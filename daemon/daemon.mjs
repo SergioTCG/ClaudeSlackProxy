@@ -343,6 +343,22 @@ async function injectText(session, text) {
   if (!alive) await resurrect(session, text)
 }
 
+// Fetch a Slack file with the bot token. Slack redirects url_private to its file
+// origin on the same domain, so fetch keeps the Authorization header. Right after
+// upload Slack briefly serves an HTML login page instead of the bytes, so retry
+// with backoff until the real content shows up.
+async function downloadSlackFile(url) {
+  for (let i = 0; i < 5; i++) {
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } })
+      const ct = res.headers.get('content-type') || ''
+      if (res.ok && !ct.includes('text/html')) return Buffer.from(await res.arrayBuffer())
+    } catch (e) { log('download attempt failed', String(e)) }
+    await sleep(800 * (i + 1))
+  }
+  return null
+}
+
 // Download files shared in a channel and inject them as local paths Claude can read.
 async function handleAttachments(channel, caption, files) {
   const session = sessionByChannel(channel)
@@ -353,21 +369,17 @@ async function handleAttachments(channel, caption, files) {
   for (const f of files) {
     const dl = f.url_private_download || f.url_private
     if (!dl) continue
-    try {
-      const res = await fetch(dl, { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } })
-      const ct = res.headers.get('content-type') || ''
-      if (!res.ok || ct.includes('text/html')) {
-        log('attachment download failed', f.name, res.status, ct)
-        await post(channel, '⚠️ Couldn’t download that file — the bot is likely missing the `files:read` scope. Reinstall the Slack app from the updated manifest.')
-        return
-      }
-      const buf = Buffer.from(await res.arrayBuffer())
-      const safe = String(f.name || f.id).replace(/[^\w.\-]+/g, '_')
-      const p = path.join(dir, `${Date.now().toString(36)}-${safe}`)
-      fs.writeFileSync(p, buf)
-      saved.push(p)
-      log('attachment saved', p, buf.length + 'b')
-    } catch (e) { log('attachment error', String(e)) }
+    const buf = await downloadSlackFile(dl)
+    if (!buf) {
+      log('attachment download failed', f.name)
+      await post(channel, `⚠️ Couldn’t download \`${f.name || f.id}\` from Slack — try resending it.`)
+      continue
+    }
+    const safe = String(f.name || f.id).replace(/[^\w.\-]+/g, '_')
+    const p = path.join(dir, `${Date.now().toString(36)}-${safe}`)
+    fs.writeFileSync(p, buf)
+    saved.push(p)
+    log('attachment saved', p, buf.length + 'b')
   }
   if (!saved.length) return
   const list = saved.map(p => `  • ${p}`).join('\n')
