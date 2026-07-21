@@ -2,7 +2,17 @@
 # ccs — bridged Claude Code launcher.
 # Wraps the session in tmux (daemon needs send-keys for consent + ./model),
 # marks it for the bridge hooks, and loads the Slack channel plugin.
-BRIDGE="/Users/sergej/Code/ClaudeSlackProxy"
+
+# Resolve BRIDGE from this script's real location, following symlinks (ccs is
+# usually symlinked onto PATH). macOS has no `readlink -f`, so walk the chain.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE:0:1}" != "/" ] && SOURCE="$DIR/$SOURCE"
+done
+BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 export CCS_BRIDGE=1
 
 if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
@@ -12,10 +22,16 @@ if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; t
   # Auto-dismiss the trust / dev-channels dialogs so the session comes up clean.
   "$BRIDGE/bin/ccs-consent" "$TN" >/dev/null 2>&1 &
   exec tmux new-session -s "$TN" \
-    "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "${BASH_SOURCE[0]}") $q"
+    "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "$SOURCE") $q"
 fi
 
+# Generate the channel MCP config with the resolved server path (no hardcoding).
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_DIR/mcp.json" <<EOF
+{ "mcpServers": { "slack-bridge": { "command": "node", "args": ["$BRIDGE/channel/server.mjs"] } } }
+EOF
+
 exec claude \
-  --mcp-config "$BRIDGE/channel/mcp.json" \
+  --mcp-config "$CONFIG_DIR/mcp.json" \
   --dangerously-load-development-channels server:slack-bridge \
   "$@"
