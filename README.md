@@ -30,12 +30,16 @@ A private channel `#{repo}-{branch}-{yyyymmdd}-{hhmm}` appears; you're invited. 
 | In Slack | Effect |
 |---|---|
 | any message in a session channel | injected into that session (resurrects it first if the terminal is gone) |
+| a file/image attachment | downloaded to `~/.claude/ccs-attachments/` and injected as a local path Claude reads (needs the bot `files:read` scope) |
 | `./new <dir> [--dsp] [--chrome] [--model X]` | spawn a new Ghostty+tmux session (dirs under `$HOME`, allowlisted flags) |
 | `./model <m>` / `./effort <e>` | sent to the session as the real slash command via tmux |
 | `./status` | table of all sessions |
 | `./help` | commands |
+| a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or reply `yes <id>` / `no <id>` |
 
-Session ends → channel gets "💤 write here to resume". Writing there spawns a Ghostty window running `claude --resume <id>` in the original cwd and rebinds. The daemon auto-clears the research-preview consent dialog for windows it spawns.
+Session ends → channel gets "💤 write here to resume". Writing there spawns a Ghostty window running `claude --resume <id>` in the original cwd and rebinds.
+
+**Consent dialogs are auto-dismissed.** `bin/ccs-consent` watches each new session's tmux pane and clears the workspace-trust and `--dangerously-load-development-channels` dialogs the moment they appear (only pressing Enter when the specific dialog is on screen). It runs for every `ccs` launch, local or daemon-spawned, so you never touch them. Note: the dev-channels warning can't be *removed* during the research preview without Anthropic allowlisting the plugin (or a Team/Enterprise `allowedChannelPlugins` managed setting) — auto-dismiss is the reliable substitute.
 
 ## Operations
 
@@ -46,12 +50,6 @@ Session ends → channel gets "💤 write here to resume". Writing there spawns 
 - **State:** `state.json` (session ↔ channel ↔ pid ↔ tmux ↔ cwd), rewritten atomically.
 - **Security:** only messages from your `SLACK_USER_ID` are processed; channels are private; `./new` restricts dirs to `$HOME` and flags to an allowlist.
 
-## Barrique integration
+## Barrique integration (done)
 
-`scripts/run-claude-vt.sh` currently ends in `vt claude --dangerously-skip-permissions`. Replace that line with:
-
-```bash
-ccs --dangerously-skip-permissions
-```
-
-The worktree number/branch already give meaningful channel names via git. (A later step can pull the Barrique registry's issue number into the channel name.)
+VibeTunnel is retired from Barrique's scripts. `scripts/run-claude.sh` (new, canonical) launches `ccs --dangerously-skip-permissions`; `run-claude-vt.sh` is a back-compat shim forwarding to it; `open-worktree.sh` now opens a **Ghostty** window running `ccs` (matching the bridge's own flow); `worktree-health-check.sh` checks for `ccs` instead of `vt`. Nothing Barrique-specific leaks into the bridge — `ccs` is a general PATH tool. (A later step can pull the Barrique registry's issue number into the channel name.)

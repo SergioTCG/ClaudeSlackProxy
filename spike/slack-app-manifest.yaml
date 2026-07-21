@@ -23,6 +23,7 @@ oauth_config:
       - groups:read
       - groups:history
       - files:write       # upload long outputs
+      - files:read        # download attachments sent from Slack
       - users:read
 settings:
   event_subscriptions:

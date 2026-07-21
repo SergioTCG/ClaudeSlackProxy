@@ -9,6 +9,8 @@ if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; t
   TN="ccs-$$-$RANDOM"
   q=""
   for a in "$@"; do q+="$(printf '%q' "$a") "; done
+  # Auto-dismiss the trust / dev-channels dialogs so the session comes up clean.
+  "$BRIDGE/bin/ccs-consent" "$TN" >/dev/null 2>&1 &
   exec tmux new-session -s "$TN" \
     "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "${BASH_SOURCE[0]}") $q"
 fi

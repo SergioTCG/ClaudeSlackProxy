@@ -1,0 +1,38 @@
+#!/bin/bash
+# Auto-dismiss Claude Code's startup dialogs in a tmux session:
+#   1. workspace-trust ("…a project you created or one you trust?")
+#   2. dev-channels warning ("Loading development channels")
+# Only presses Enter when the specific dialog is actually on screen (Enter picks
+# the highlighted "trust / I am using this for local development" option), so it
+# never sends a stray keystroke into a real prompt. Exits once the channels
+# dialog is handled or after a timeout.
+TN="$1"
+[ -n "$TN" ] || exit 0
+
+# Wait for the session to exist (ccs launches us just before it creates it).
+for _ in $(seq 1 30); do tmux has-session -t "$TN" 2>/dev/null && break; sleep 0.3; done
+
+deadline=$(( $(date +%s) + 30 ))
+trust_done=0
+chan_done=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    tmux has-session -t "$TN" 2>/dev/null || exit 0
+    pane="$(tmux capture-pane -t "$TN" -p 2>/dev/null)"
+
+    if [ "$trust_done" -eq 0 ] && printf '%s' "$pane" | grep -q "you created or one you trust"; then
+        tmux send-keys -t "$TN" Enter
+        trust_done=1
+        sleep 1
+        continue
+    fi
+    if [ "$chan_done" -eq 0 ] && printf '%s' "$pane" | grep -q "development channels"; then
+        tmux send-keys -t "$TN" Enter
+        chan_done=1
+        sleep 1
+        continue
+    fi
+    # The channels dialog (always shown under --dangerously-load-development-channels)
+    # is the last one; once it's cleared we're done.
+    [ "$chan_done" -eq 1 ] && exit 0
+    sleep 0.5
+done

@@ -316,30 +316,65 @@ async function handleSlackMessage(channel, text) {
     log('inbound (unmapped channel, ignored)', channel)
     return
   }
-  const alive = session.pid && pidAlive(session.pid)
+  await injectText(session, trimmed)
+}
 
-  // 1st choice: paste into the visible terminal — full message shows in the TUI
+// Deliver text into a session: prefer a tmux paste (full text shows in the TUI),
+// fall back to a channel event, and resurrect the session if it's gone.
+async function injectText(session, text) {
+  const alive = session.pid && pidAlive(session.pid)
   if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
-    rememberInjected(session.id, trimmed)
+    rememberInjected(session.id, text)
     try {
-      await tmuxPaste(session.tmux, trimmed)
-      log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(trimmed.slice(0, 50)))
+      await tmuxPaste(session.tmux, text)
+      log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
       return
     } catch (e) {
       log('tmux paste failed, falling back to channel event', String(e))
     }
   }
-  // fallback: channel event via the MCP plugin (no-tmux/headless sessions)
-  if (alive && injectToSession(session.pid, trimmed)) {
-    log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(trimmed.slice(0, 50)))
+  if (alive && injectToSession(session.pid, text)) {
+    log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
     return
   }
-
-  // dead or detached → resurrect
   log('resurrect', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
   const q = pendingBySid.get(session.id) || []
-  pendingBySid.set(session.id, [...q, trimmed])
-  if (!alive) await resurrect(session, trimmed)
+  pendingBySid.set(session.id, [...q, text])
+  if (!alive) await resurrect(session, text)
+}
+
+// Download files shared in a channel and inject them as local paths Claude can read.
+async function handleAttachments(channel, caption, files) {
+  const session = sessionByChannel(channel)
+  if (!session) { log('attachment in unmapped channel, ignored', channel); return }
+  const dir = path.join(process.env.HOME, '.claude', 'ccs-attachments')
+  fs.mkdirSync(dir, { recursive: true })
+  const saved = []
+  for (const f of files) {
+    const dl = f.url_private_download || f.url_private
+    if (!dl) continue
+    try {
+      const res = await fetch(dl, { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } })
+      const ct = res.headers.get('content-type') || ''
+      if (!res.ok || ct.includes('text/html')) {
+        log('attachment download failed', f.name, res.status, ct)
+        await post(channel, '⚠️ Couldn’t download that file — the bot is likely missing the `files:read` scope. Reinstall the Slack app from the updated manifest.')
+        return
+      }
+      const buf = Buffer.from(await res.arrayBuffer())
+      const safe = String(f.name || f.id).replace(/[^\w.\-]+/g, '_')
+      const p = path.join(dir, `${Date.now().toString(36)}-${safe}`)
+      fs.writeFileSync(p, buf)
+      saved.push(p)
+      log('attachment saved', p, buf.length + 'b')
+    } catch (e) { log('attachment error', String(e)) }
+  }
+  if (!saved.length) return
+  const list = saved.map(p => `  • ${p}`).join('\n')
+  const body = caption?.trim()
+    ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
+    : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
+  await injectText(session, body)
 }
 
 async function handleCommand(channel, cmd) {
@@ -430,10 +465,15 @@ http.createServer(async (req, res) => {
 const sm = new SocketModeClient({ appToken: process.env.SLACK_APP_TOKEN })
 sm.on('message', async ({ event, ack }) => {
   try { await ack() } catch {}
-  if (!event || event.bot_id || event.subtype) return
+  if (!event || event.bot_id) return
+  // allow normal messages and file shares; skip edits/joins/other subtypes
+  if (event.subtype && event.subtype !== 'file_share') return
   if (event.user !== USER) return // single trusted sender
-  try { await handleSlackMessage(event.channel, unescapeSlack(event.text || '')) }
-  catch (e) { log('slack msg error', String(e)) }
+  try {
+    const text = unescapeSlack(event.text || '')
+    if (event.files?.length) await handleAttachments(event.channel, text, event.files)
+    else await handleSlackMessage(event.channel, text)
+  } catch (e) { log('slack msg error', String(e)) }
 })
 
 // Approve/Deny button taps arrive as interactive (block_actions) envelopes.

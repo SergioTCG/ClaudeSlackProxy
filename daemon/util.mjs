@@ -1,4 +1,4 @@
-import { execFile as _execFile } from 'node:child_process'
+import { execFile as _execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -114,19 +114,17 @@ export async function tmuxSendCommand(tname, slashCommand) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
 }
 
-export async function tmuxPressEnter(tname) {
-  await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
-}
-
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   const inner = `cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
   await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
-    // Nobody is at the Mac: acknowledge the research-preview channels dialog.
-    for (const delay of [3000, 6000, 9000]) {
-      setTimeout(() => tmuxPressEnter(tmuxName).catch(() => {}), delay)
-    }
+    // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when
+    // they actually appear (safer than blind timed Enter presses).
+    const child = spawn(path.join(BRIDGE, 'bin', 'ccs-consent'), [tmuxName], {
+      detached: true, stdio: 'ignore',
+    })
+    child.unref()
   }
 }
