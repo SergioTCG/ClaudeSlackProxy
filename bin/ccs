@@ -1,0 +1,19 @@
+#!/bin/bash
+# ccs — bridged Claude Code launcher.
+# Wraps the session in tmux (daemon needs send-keys for consent + ./model),
+# marks it for the bridge hooks, and loads the Slack channel plugin.
+BRIDGE="/Users/sergej/Code/ClaudeSlackProxy"
+export CCS_BRIDGE=1
+
+if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
+  TN="ccs-$$-$RANDOM"
+  q=""
+  for a in "$@"; do q+="$(printf '%q' "$a") "; done
+  exec tmux new-session -s "$TN" \
+    "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "${BASH_SOURCE[0]}") $q"
+fi
+
+exec claude \
+  --mcp-config "$BRIDGE/channel/mcp.json" \
+  --dangerously-load-development-channels server:slack-bridge \
+  "$@"

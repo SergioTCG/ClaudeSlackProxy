@@ -1,0 +1,10 @@
+{
+  "name": "claude-slack-proxy-spike",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@slack/socket-mode": "^3.0.0",
+    "@slack/web-api": "^8.0.0"
+  }
+}

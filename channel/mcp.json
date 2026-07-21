@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slack-bridge": {
+      "command": "node",
+      "args": ["/Users/sergej/Code/ClaudeSlackProxy/channel/server.mjs"]
+    }
+  }
+}
