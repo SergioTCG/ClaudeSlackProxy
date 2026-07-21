@@ -94,6 +94,20 @@ export function channelName(repo, branch) {
 // ---- tmux / ghostty ---------------------------------------------------------
 const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`
 
+export async function tmuxAlive(tname) {
+  try { await execFile('tmux', ['has-session', '-t', tname]); return true } catch { return false }
+}
+
+// Inject a full message into the session's input box as a bracketed paste,
+// then submit. Unlike channel events (rendered as a ~50-char summary line),
+// this shows the complete message in the terminal exactly as if typed.
+export async function tmuxPaste(tname, text) {
+  await execFile('tmux', ['set-buffer', '-b', 'ccs-inject', text])
+  await execFile('tmux', ['paste-buffer', '-p', '-d', '-b', 'ccs-inject', '-t', tname])
+  await sleep(300)
+  await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
+}
+
 export async function tmuxSendCommand(tname, slashCommand) {
   await execFile('tmux', ['send-keys', '-t', tname, '-l', slashCommand])
   await sleep(150)

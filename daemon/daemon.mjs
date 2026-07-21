@@ -8,7 +8,7 @@ import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, channelName,
-  tmuxSendCommand, ghosttySpawn,
+  tmuxSendCommand, tmuxAlive, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack } from './slackout.mjs'
 
@@ -20,8 +20,20 @@ const state = loadState()
 
 // pid → { res } live SSE connections from channel servers
 const streams = new Map()
-// pid → [messages] queued while no channel server is attached (during resurrection)
-const pending = new Map()
+// sid → texts injected from Slack, awaiting their UserPromptSubmit echo (dedup)
+const injectedRecently = new Map()
+function rememberInjected(sid, text) {
+  const a = injectedRecently.get(sid) || []
+  a.push({ text: text.trim(), at: Date.now() })
+  injectedRecently.set(sid, a.slice(-10))
+}
+function consumeInjected(sid, prompt) {
+  const a = injectedRecently.get(sid) || []
+  const p = prompt.trim()
+  const i = a.findIndex(x => x.text === p && Date.now() - x.at < 120000)
+  if (i >= 0) { a.splice(i, 1); return true }
+  return false
+}
 const ALLOWED_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort'])
 const FLAG_ALIAS = { '--dsp': '--dangerously-skip-permissions' }
 
@@ -156,17 +168,29 @@ async function onHook(body, ppid, tmux) {
     const src = body.source
     if (src === 'resume') await post(ch, '▶️ *Resumed*')
     else if (src === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
-    // flush anything queued while resurrecting
-    const q = pending.get(pid)
-    if (q?.length) { for (const m of q) injectToSession(pid, m); pending.set(pid, []) }
+    // flush messages queued during resurrection: paste into the fresh terminal
+    const queued = pendingBySid.get(sid) || []
+    if (queued.length && session.tmux) {
+      pendingBySid.set(sid, [])
+      const tn = session.tmux
+      setTimeout(async () => {
+        for (const m of queued) {
+          rememberInjected(sid, m)
+          await tmuxPaste(tn, m).catch(e => log('flush paste failed', String(e)))
+          await sleep(500)
+        }
+      }, 2000)
+    }
     return
   }
   if (ev === 'UserPromptSubmit') {
     const ch = session.channel || (await ensureChannel(session))
     const p = (body.prompt || '').trim()
-    // Skip Slack-injected prompts: they arrive wrapped as <channel source="slack-bridge" …>
-    // and are already visible in the channel, so mirroring them back is noise.
-    if (p && !p.includes('source="slack-bridge"')) await post(ch, `💬 *You (terminal):*\n${p}`)
+    // Skip prompts we injected from Slack (tmux paste = exact text match;
+    // channel-event fallback = wrapped in <channel source="slack-bridge">).
+    if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"')) {
+      await post(ch, `💬 *You (terminal):*\n${p}`)
+    }
     return
   }
   if (ev === 'PreToolUse') {
@@ -215,10 +239,8 @@ async function resurrect(session, text) {
     tmuxName,
     autoConsent: true,
   })
-  // queue the message; SessionStart(resume) will flush it once the channel server attaches
-  const q = pending.get(session.pid) || []
-  // pid will change after respawn; queue under a placeholder keyed by session id instead
-  pendingBySid.set(session.id, [...(pendingBySid.get(session.id) || []), text])
+  // the caller has already queued the message in pendingBySid;
+  // SessionStart flushes it into the fresh terminal once the session is up
 }
 const pendingBySid = new Map()
 
@@ -237,8 +259,22 @@ async function handleSlackMessage(channel, text) {
     log('inbound (unmapped channel, ignored)', channel)
     return
   }
-  if (session.pid && pidAlive(session.pid) && injectToSession(session.pid, trimmed)) {
-    log('inject → session', session.id.slice(0, 8), JSON.stringify(trimmed.slice(0, 50)))
+  const alive = session.pid && pidAlive(session.pid)
+
+  // 1st choice: paste into the visible terminal — full message shows in the TUI
+  if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
+    rememberInjected(session.id, trimmed)
+    try {
+      await tmuxPaste(session.tmux, trimmed)
+      log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(trimmed.slice(0, 50)))
+      return
+    } catch (e) {
+      log('tmux paste failed, falling back to channel event', String(e))
+    }
+  }
+  // fallback: channel event via the MCP plugin (no-tmux/headless sessions)
+  if (alive && injectToSession(session.pid, trimmed)) {
+    log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(trimmed.slice(0, 50)))
     return
   }
 
@@ -246,7 +282,7 @@ async function handleSlackMessage(channel, text) {
   log('resurrect', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
   const q = pendingBySid.get(session.id) || []
   pendingBySid.set(session.id, [...q, trimmed])
-  if (!session.pid || !pidAlive(session.pid)) await resurrect(session, trimmed)
+  if (!alive) await resurrect(session, trimmed)
 }
 
 async function handleCommand(channel, cmd) {
