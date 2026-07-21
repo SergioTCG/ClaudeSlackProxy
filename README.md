@@ -33,9 +33,13 @@ A private channel `#{repo}-{branch}-{yyyymmdd}-{hhmm}` appears; you're invited. 
 | a file/image attachment | downloaded to `~/.claude/ccs-attachments/` and injected as a local path Claude reads (needs the bot `files:read` scope) |
 | `./new <dir> [--dsp] [--chrome] [--model X]` | spawn a new Ghostty+tmux session (dirs under `$HOME`, allowlisted flags) |
 | `./model <m>` / `./effort <e>` | sent to the session as the real slash command via tmux |
-| `./status` | table of all sessions |
+| `./status` | table of all sessions · `./health` — bridge uptime/counts |
+| `./kill [here\|<id>]` | end a session (process stops; channel stays, resumable) |
+| `./cleanup` | archive dormant channels (run from the control channel) |
 | `./help` | commands |
 | a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or reply `yes <id>` / `no <id>` |
+
+Responses over ~6,000 chars upload as a `response.md` file instead of splitting across many messages. Channel names are `{repo}-{branch}-{timestamp}` for any git repo (repo from the remote; linked worktrees use their branch), with the full cwd in the channel topic — no per-project configuration.
 
 Session ends → channel gets "💤 write here to resume". Writing there spawns a Ghostty window running `claude --resume <id>` in the original cwd and rebinds.
 

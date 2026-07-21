@@ -34,11 +34,20 @@ export function unescapeSlack(s) {
     .replace(/&amp;/g, '&')
 }
 
+// Convert a markdown subset to Slack mrkdwn — but never inside ``` fenced code,
+// so pasted code with '#' comments or '**' survives the trip to Slack.
 function mrkdwn(text) {
   return text
-    .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
-    .replace(/\*\*(.+?)\*\*/g, '*$1*')
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<$2|$1>')
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) =>
+      i % 2 === 1
+        ? seg
+        : seg
+            .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
+            .replace(/\*\*(.+?)\*\*/g, '*$1*')
+            .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<$2|$1>')
+    )
+    .join('')
 }
 
 function parseTable(lines) {
@@ -71,7 +80,10 @@ export function mdToMessages(md) {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: text.slice(i, i + 2900) } })
     }
   }
+  let inFence = false
   for (let i = 0; i < lines.length; i++) {
+    if (/^\s*```/.test(lines[i])) { inFence = !inFence; buf.push(lines[i]); continue }
+    if (inFence) { buf.push(lines[i]); continue } // never parse tables inside code
     const isRow = /^\s*\|.+\|\s*$/.test(lines[i])
     const isSep = /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || '')
     if (isRow && isSep) {

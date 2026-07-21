@@ -71,23 +71,40 @@ export function pidAlive(pid) {
 }
 
 // ---- git / naming -----------------------------------------------------------
+// General git identity for ANY project (no per-repo logic):
+//  - repo:     canonical name from the remote, else the main worktree's dir
+//  - branch:   current branch (workflows are branch-bound)
+//  - worktree: this checkout's dir name, when it differs from repo (linked worktree)
 export async function gitInfo(cwd) {
   let repo = path.basename(cwd)
   let branch = ''
+  let worktree = ''
+  const git = async (...a) => (await execFile('git', ['-C', cwd, ...a])).stdout.trim()
   try {
-    const { stdout: top } = await execFile('git', ['-C', cwd, 'rev-parse', '--show-toplevel'])
-    repo = path.basename(top.trim())
-    const { stdout: br } = await execFile('git', ['-C', cwd, 'branch', '--show-current'])
-    branch = br.trim()
+    const toplevel = await git('rev-parse', '--show-toplevel')
+    // repo name: prefer the remote's name, else the main repo dir (common-dir's parent)
+    const commonDir = path.resolve(cwd, await git('rev-parse', '--git-common-dir'))
+    repo = path.basename(path.dirname(commonDir))
+    try {
+      const url = await git('remote', 'get-url', 'origin')
+      const m = url.replace(/\.git$/, '').match(/([^/:]+)$/)
+      if (m) repo = m[1]
+    } catch {}
+    // a linked worktree's git-dir differs from the shared common-dir
+    const gitDir = path.resolve(await git('rev-parse', '--absolute-git-dir'))
+    if (gitDir !== commonDir) worktree = path.basename(toplevel)
+    branch = await git('branch', '--show-current')
   } catch {}
-  return { repo, branch }
+  return { repo, branch, worktree }
 }
 
-export function channelName(repo, branch) {
+export function channelName(repo, branch, worktree) {
   const d = new Date()
   const pad = n => String(n).padStart(2, '0')
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
-  const base = [repo, branch, stamp].filter(Boolean).join('-')
+  // repo + branch is the recognizable core; worktree name only fills in for a
+  // detached HEAD (no branch). The full cwd lives in the channel topic either way.
+  const base = [repo, branch || worktree, stamp].filter(Boolean).join('-')
   return base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').slice(0, 75)
 }
 
@@ -96,6 +113,10 @@ const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`
 
 export async function tmuxAlive(tname) {
   try { await execFile('tmux', ['has-session', '-t', tname]); return true } catch { return false }
+}
+
+export async function tmuxKill(tname) {
+  try { await execFile('tmux', ['kill-session', '-t', tname]) } catch {}
 }
 
 // Inject a full message into the session's input box as a bracketed paste,

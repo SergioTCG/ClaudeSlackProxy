@@ -8,7 +8,7 @@ import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, channelName,
-  tmuxSendCommand, tmuxAlive, tmuxPaste, ghosttySpawn,
+  tmuxSendCommand, tmuxAlive, tmuxKill, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -17,6 +17,8 @@ const USER = process.env.SLACK_USER_ID
 const TEAM = process.env.SLACK_TEAM_ID
 const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const state = loadState()
+if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
+const BOOT_TS = Date.now()
 
 // pid → { res } live SSE connections from channel servers
 const streams = new Map()
@@ -36,8 +38,6 @@ function consumeInjected(sid, prompt) {
 }
 const ALLOWED_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort'])
 const FLAG_ALIAS = { '--dsp': '--dangerously-skip-permissions' }
-// request_id → { pid, channel, ts, tool } for open permission prompts relayed to Slack
-const permReq = new Map()
 const PERM_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 // ---- session/channel helpers -----------------------------------------------
@@ -51,17 +51,27 @@ function sessionByChannel(ch) {
 function post(channel, text) {
   return enqueue(channel, () => web.chat.postMessage({ channel, text, unfurl_links: false }))
 }
-function postMd(channel, md) {
-  const msgs = mdToMessages(md)
-  return Promise.all(
-    msgs.map(m => enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false })))
-  )
+const MAX_INLINE = 6000 // longer responses upload as a file instead of many messages
+async function postMd(channel, md) {
+  if (md.length > MAX_INLINE) {
+    return enqueue(channel, () => web.files.uploadV2({
+      channel_id: channel,
+      content: md,
+      filename: 'response.md',
+      title: 'response.md',
+      initial_comment: `📄 Long response (${md.length.toLocaleString()} chars) — attached:`,
+    })).catch(async e => {
+      log('file upload failed, falling back to inline', String(e))
+      for (const m of mdToMessages(md)) await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
+    })
+  }
+  for (const m of mdToMessages(md)) await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
 }
 
 async function ensureChannel(session) {
   if (session.channel) return session.channel
-  const { repo, branch } = await gitInfo(session.cwd)
-  const name = channelName(repo, branch)
+  const { repo, branch, worktree } = await gitInfo(session.cwd)
+  const name = channelName(repo, branch, worktree)
   let created
   try {
     created = await web.conversations.create({ name, is_private: true })
@@ -74,7 +84,7 @@ async function ensureChannel(session) {
   state.channels[ch] = session.id
   saveState(state)
   try { await web.conversations.invite({ channel: ch, users: USER }) } catch {}
-  try { await web.conversations.setTopic({ channel: ch, topic: `${session.cwd} · ${branch || 'no-branch'}` }) } catch {}
+  try { await web.conversations.setTopic({ channel: ch, topic: `${session.cwd} · ${branch || 'no-branch'}${worktree ? ' · wt:' + worktree : ''}` }) } catch {}
   await post(ch, `🟢 *Session started*\n\`${session.cwd}\`\nBranch: \`${branch || '—'}\` · Session \`${session.id.slice(0, 8)}\``)
   return ch
 }
@@ -252,9 +262,10 @@ async function postPermissionPrompt(channel, p) {
 
 // Apply a verdict from a button tap or a text reply. Idempotent: unknown/expired ids are ignored.
 async function applyVerdict(rid, behavior, channel, ts) {
-  const req = permReq.get(rid)
+  const req = state.perms[rid]
   if (!req) return false
-  permReq.delete(rid)
+  delete state.perms[rid]
+  saveState(state)
   const s = streams.get(req.pid)
   if (s) s.res.write(`data: ${JSON.stringify({ type: 'permission_verdict', request_id: rid, behavior })}\n\n`)
   log('verdict', behavior, rid, '→ session pid', req.pid)
@@ -392,7 +403,13 @@ async function handleAttachments(channel, caption, files) {
 async function handleCommand(channel, cmd) {
   const [name, ...rest] = cmd.slice(2).split(/\s+/)
   if (name === 'help') {
-    return post(channel, '*Commands*\n`./new <dir> [--dsp] [--chrome] [--model X]` — spawn a session\n`./model <m>` · `./effort <e>` — in a session channel\n`./status` — list sessions')
+    return post(channel,
+      '*Commands*\n' +
+      '`./new <dir> [--dsp] [--chrome] [--model X]` — spawn a session\n' +
+      '`./model <m>` · `./effort <e>` — send to a session\n' +
+      '`./status` — list sessions · `./health` — bridge status\n' +
+      '`./kill [here|<id>]` — end a session (channel stays, resumable)\n' +
+      '`./cleanup` — archive dormant channels (run from control channel)')
   }
   if (name === 'status') {
     const rows = Object.values(state.sessions).map(s => {
@@ -400,6 +417,42 @@ async function handleCommand(channel, cmd) {
       return `| ${path.basename(s.cwd)} | ${s.id.slice(0, 8)} | ${alive ? '🟢 active' : '💤 dormant'} |`
     })
     return postMd(channel, `| Session | ID | State |\n|---|---|---|\n${rows.join('\n') || '| _none_ | | |'}`)
+  }
+  if (name === 'health') {
+    const sess = Object.values(state.sessions)
+    const active = sess.filter(s => s.pid && pidAlive(s.pid)).length
+    const up = Math.round((Date.now() - BOOT_TS) / 1000)
+    const hms = up < 3600 ? `${Math.round(up / 60)}m` : `${(up / 3600).toFixed(1)}h`
+    return postMd(channel,
+      `| Bridge health | |\n|---|---|\n` +
+      `| Uptime | ${hms} |\n` +
+      `| Sessions | ${active} active, ${sess.length - active} dormant |\n` +
+      `| Channel servers attached | ${streams.size} |\n` +
+      `| Open permission prompts | ${Object.keys(state.perms).length} |`)
+  }
+  if (name === 'kill') {
+    const target = rest[0] && rest[0] !== 'here'
+      ? Object.values(state.sessions).find(s => s.id.startsWith(rest[0]))
+      : sessionByChannel(channel)
+    if (!target) return post(channel, 'No matching session — use `./kill here` in a session channel, or `./kill <id-prefix>`.')
+    if (target.tmux) await tmuxKill(target.tmux)
+    if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
+    await clearStatus(target)
+    target.pid = null
+    saveState(state)
+    return post(channel, `🛑 Ended session \`${target.id.slice(0, 8)}\` (${path.basename(target.cwd)}). The channel stays — write here to resume.`)
+  }
+  if (name === 'cleanup') {
+    const dead = Object.values(state.sessions).filter(s => s.channel && s.channel !== channel && !(s.pid && pidAlive(s.pid)))
+    if (!dead.length) return post(channel, 'No dormant channels to archive (skipping the one you’re in).')
+    let n = 0
+    for (const s of dead) {
+      try { await web.conversations.archive({ channel: s.channel }); n++ } catch (e) { log('archive failed', s.channel, e?.data?.error) }
+      delete state.channels[s.channel]
+      delete state.sessions[s.id]
+    }
+    saveState(state)
+    return post(channel, `🧹 Archived ${n} dormant channel(s). Note: archived channels can’t auto-resume — unarchive manually in Slack if you need one back.`)
   }
   if (name === 'model' || name === 'effort') {
     const session = sessionByChannel(channel)
@@ -448,7 +501,8 @@ http.createServer(async (req, res) => {
       const session = sessionByPid(pid)
       if (!session?.channel) { log('perm-request: no channel for pid', pid); return }
       const ts = await postPermissionPrompt(session.channel, p)
-      permReq.set(p.request_id, { pid, channel: session.channel, ts, tool: p.tool_name || 'tool' })
+      state.perms[p.request_id] = { pid, channel: session.channel, ts, tool: p.tool_name || 'tool' }
+      saveState(state)
       log('perm-request', p.request_id, p.tool_name, '→', session.id.slice(0, 8))
     } catch (e) { log('perm-request error', String(e)) }
     return
