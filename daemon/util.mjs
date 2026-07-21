@@ -1,19 +1,25 @@
 import { execFile as _execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const execFile = promisify(_execFile)
 export const BRIDGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const STATE_FILE = path.join(BRIDGE, 'state.json')
+// Config + state live outside the repo so updates never touch secrets/state.
+// Legacy in-repo locations are still read as a fallback (and state is migrated).
+export const CONFIG_DIR = process.env.CCS_CONFIG_DIR || path.join(os.homedir(), '.config', 'ccs')
+const STATE_FILE = path.join(CONFIG_DIR, 'state.json')
+const LEGACY_STATE = path.join(BRIDGE, 'state.json')
 
 export const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a)
 export const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 export function loadEnv() {
-  const f = path.join(BRIDGE, '.env')
-  if (!fs.existsSync(f)) throw new Error('.env missing at repo root')
+  const candidates = [path.join(CONFIG_DIR, 'env'), path.join(BRIDGE, '.env')]
+  const f = candidates.find(p => fs.existsSync(p))
+  if (!f) throw new Error(`no env file found (looked in: ${candidates.join(', ')})`)
   for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
     const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
@@ -22,6 +28,10 @@ export function loadEnv() {
 
 // ---- state ------------------------------------------------------------------
 export function loadState() {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  if (!fs.existsSync(STATE_FILE) && fs.existsSync(LEGACY_STATE)) {
+    try { fs.copyFileSync(LEGACY_STATE, STATE_FILE) } catch {} // one-time migration
+  }
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
   } catch {
