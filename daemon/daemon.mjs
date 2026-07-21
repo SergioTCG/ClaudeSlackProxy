@@ -10,7 +10,7 @@ import {
   resolveClaudePid, pidAlive, gitInfo, channelName,
   tmuxSendCommand, tmuxAlive, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
-import { enqueue, mdToMessages, unescapeSlack } from './slackout.mjs'
+import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
 loadEnv()
 const USER = process.env.SLACK_USER_ID
@@ -36,6 +36,9 @@ function consumeInjected(sid, prompt) {
 }
 const ALLOWED_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort'])
 const FLAG_ALIAS = { '--dsp': '--dangerously-skip-permissions' }
+// request_id → { pid, channel, ts, tool } for open permission prompts relayed to Slack
+const permReq = new Map()
+const PERM_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 // ---- session/channel helpers -----------------------------------------------
 function sessionByPid(pid) {
@@ -113,19 +116,25 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
   }
 }
 
+// Reads assistant text written since session.offset. Safe to call mid-turn:
+// only advances offset past COMPLETE lines, so a record being flushed is never
+// cut in half (which would orphan its bytes and lose the message).
 function readNewAssistantText(session) {
   const f = session.transcript
   if (!f || !fs.existsSync(f)) return ''
   const size = fs.statSync(f).size
   const from = session.offset || 0
-  if (size <= from) { session.offset = size; return '' }
+  if (size <= from) return ''
   const fd = fs.openSync(f, 'r')
   const buf = Buffer.alloc(size - from)
   fs.readSync(fd, buf, 0, buf.length, from)
   fs.closeSync(fd)
-  session.offset = size
+  const str = buf.toString('utf8')
+  const lastNl = str.lastIndexOf('\n')
+  if (lastNl < 0) return '' // no complete line yet; wait for more
+  session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
   const out = []
-  for (const line of buf.toString('utf8').split('\n')) {
+  for (const line of str.slice(0, lastNl).split('\n')) {
     if (!line.trim()) continue
     let rec
     try { rec = JSON.parse(line) } catch { continue }
@@ -194,6 +203,11 @@ async function onHook(body, ppid, tmux) {
     return
   }
   if (ev === 'PreToolUse') {
+    // Stream out any prose Claude wrote before this tool call, so the channel
+    // shows the turn unfolding instead of one dump at Stop. Clear the old status
+    // first so a fresh "doing X now" line stays the newest message.
+    const text = readNewAssistantText(session)
+    if (text) { await clearStatus(session); await postMd(session.channel, text) }
     const name = body.tool_name || 'tool'
     const detail = body.tool_input?.command || body.tool_input?.file_path || body.tool_input?.description || ''
     await setStatus(session, `⏺ ${name}${detail ? ' — ' + String(detail).slice(0, 80) : ''}…`)
@@ -214,6 +228,41 @@ async function onHook(body, ppid, tmux) {
     saveState(state)
     return
   }
+}
+
+// ---- permission relay -------------------------------------------------------
+async function postPermissionPrompt(channel, p) {
+  const preview = String(p.input_preview || '').slice(0, 1200)
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `🔐 *Claude wants to use \`${escapeText(p.tool_name || 'a tool')}\`*\n${escapeText(String(p.description || '').slice(0, 600))}` } },
+  ]
+  if (preview) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '```' + preview + '```' } })
+  blocks.push(
+    {
+      type: 'actions', block_id: `perm_${p.request_id}`, elements: [
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: '✅ Approve' }, action_id: 'perm_allow', value: `allow:${p.request_id}` },
+        { type: 'button', style: 'danger', text: { type: 'plain_text', text: '⛔ Deny' }, action_id: 'perm_deny', value: `deny:${p.request_id}` },
+      ],
+    },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`` }] },
+  )
+  const r = await enqueue(channel, () => web.chat.postMessage({ channel, text: `🔐 Permission needed: ${p.tool_name}`, blocks }))
+  return r.ts
+}
+
+// Apply a verdict from a button tap or a text reply. Idempotent: unknown/expired ids are ignored.
+async function applyVerdict(rid, behavior, channel, ts) {
+  const req = permReq.get(rid)
+  if (!req) return false
+  permReq.delete(rid)
+  const s = streams.get(req.pid)
+  if (s) s.res.write(`data: ${JSON.stringify({ type: 'permission_verdict', request_id: rid, behavior })}\n\n`)
+  log('verdict', behavior, rid, '→ session pid', req.pid)
+  const decided = behavior === 'allow' ? '✅ *Approved*' : '⛔ *Denied*'
+  try {
+    await web.chat.update({ channel: channel || req.channel, ts: ts || req.ts, text: `${decided} ${req.tool}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${decided} \`${escapeText(req.tool)}\`` } }] })
+  } catch {}
+  return true
 }
 
 // ---- injection & resurrection ----------------------------------------------
@@ -246,6 +295,14 @@ const pendingBySid = new Map()
 
 async function handleSlackMessage(channel, text) {
   const trimmed = text.trim()
+
+  // permission verdict by text ("yes abcde" / "no abcde")
+  const pm = PERM_REPLY_RE.exec(trimmed)
+  if (pm) {
+    const ok = await applyVerdict(pm[2].toLowerCase(), /^y/i.test(pm[1]) ? 'allow' : 'deny', channel)
+    if (!ok) await post(channel, '⚠️ No open permission request with that code (it may have been answered or expired).')
+    return
+  }
 
   // commands
   if (trimmed.startsWith('./')) {
@@ -334,6 +391,21 @@ http.createServer(async (req, res) => {
     catch (e) { log('hook error', String(e)) }
     return
   }
+  if (url.pathname === '/permission-request' && req.method === 'POST') {
+    let body = ''
+    for await (const c of req) body += c
+    res.end('ok')
+    try {
+      const p = JSON.parse(body)
+      const pid = await resolveClaudePid(url.searchParams.get('ppid'))
+      const session = sessionByPid(pid)
+      if (!session?.channel) { log('perm-request: no channel for pid', pid); return }
+      const ts = await postPermissionPrompt(session.channel, p)
+      permReq.set(p.request_id, { pid, channel: session.channel, ts, tool: p.tool_name || 'tool' })
+      log('perm-request', p.request_id, p.tool_name, '→', session.id.slice(0, 8))
+    } catch (e) { log('perm-request error', String(e)) }
+    return
+  }
   if (url.pathname === '/channel/stream') {
     const ppid = Number(url.searchParams.get('ppid'))
     const pid = await resolveClaudePid(ppid)
@@ -362,6 +434,18 @@ sm.on('message', async ({ event, ack }) => {
   if (event.user !== USER) return // single trusted sender
   try { await handleSlackMessage(event.channel, unescapeSlack(event.text || '')) }
   catch (e) { log('slack msg error', String(e)) }
+})
+
+// Approve/Deny button taps arrive as interactive (block_actions) envelopes.
+sm.on('interactive', async ({ body, ack }) => {
+  try { await ack() } catch {}
+  try {
+    if (body?.type !== 'block_actions' || body.user?.id !== USER) return
+    const action = body.actions?.[0]
+    if (!action?.value) return
+    const [behavior, rid] = String(action.value).split(':')
+    await applyVerdict(rid, behavior, body.channel?.id, body.message?.ts)
+  } catch (e) { log('interactive error', String(e)) }
 })
 
 // ---- liveness sweep ---------------------------------------------------------

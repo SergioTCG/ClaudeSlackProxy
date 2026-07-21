@@ -4,13 +4,19 @@
 // as channel events. Outbound mirroring is done by hooks, so no reply tool exists.
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { z } from 'zod'
 
 const DAEMON = 'http://127.0.0.1:8877'
 
 const mcp = new Server(
   { name: 'slack-bridge', version: '1.0.0' },
   {
-    capabilities: { experimental: { 'claude/channel': {} } },
+    capabilities: {
+      experimental: {
+        'claude/channel': {},
+        'claude/channel/permission': {}, // relay tool-approval prompts to Slack
+      },
+    },
     instructions:
       'Messages arriving as <channel source="slack-bridge"> are from Sergej, sent from Slack. ' +
       'Treat them exactly as if he typed them into this terminal: do the work in this session and ' +
@@ -18,6 +24,29 @@ const mcp = new Server(
       'automatically — there is no reply tool and you must not mention this plumbing.',
   },
 )
+
+// Claude Code sends this when a tool needs approval. Forward it to the daemon,
+// which posts Approve/Deny to Slack; the verdict comes back over the SSE stream.
+const PermissionRequestSchema = z.object({
+  method: z.literal('notifications/claude/channel/permission_request'),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string().optional().default(''),
+  }),
+})
+mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
+  try {
+    await fetch(`${DAEMON}/permission-request?ppid=${process.ppid}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(params),
+    })
+  } catch {
+    // daemon unreachable — the local terminal dialog still works
+  }
+})
 
 await mcp.connect(new StdioServerTransport())
 
@@ -47,11 +76,17 @@ async function pump() {
           if (!data) continue
           let msg
           try { msg = JSON.parse(data) } catch { continue }
-          if (msg.type !== 'message' || !msg.text) continue
-          await mcp.notification({
-            method: 'notifications/claude/channel',
-            params: { content: msg.text, meta: { via: 'slack' } },
-          })
+          if (msg.type === 'message' && msg.text) {
+            await mcp.notification({
+              method: 'notifications/claude/channel',
+              params: { content: msg.text, meta: { via: 'slack' } },
+            })
+          } else if (msg.type === 'permission_verdict' && msg.request_id) {
+            await mcp.notification({
+              method: 'notifications/claude/channel/permission',
+              params: { request_id: msg.request_id, behavior: msg.behavior },
+            })
+          }
         }
       }
     } catch {
