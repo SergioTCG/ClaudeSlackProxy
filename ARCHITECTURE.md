@@ -24,7 +24,7 @@ Slack (private channels, Socket Mode)
 └────────────────────────────────────────────────────────────────┘
 ```
 
-- **`bin/ccs`** — the launcher. Replaces `claude` (and Barrique's `vt claude`). Always wraps the session in **tmux inside the terminal window** (terminal invariant preserved; tmux is what makes the session *drivable*), exports `CCS_BRIDGE=1` + `CCS_TMUX=<name>`, then execs `claude --mcp-config <generated> --dangerously-load-development-channels server:slack-bridge [args]`. The MCP config is generated at launch into `~/.config/ccs/mcp.json` with `ccs`'s resolved install path, so nothing is hardcoded.
+- **`bin/ccs`** — the launcher. Replaces `claude` (and any VibeTunnel `vt claude`). Always wraps the session in **tmux inside the terminal window** (terminal invariant preserved; tmux is what makes the session *drivable*), exports `CCS_BRIDGE=1` + `CCS_TMUX=<name>`, then execs `claude --mcp-config <generated> --dangerously-load-development-channels server:slack-bridge [args]`. The MCP config is generated at launch into `~/.config/ccs/mcp.json` with `ccs`'s resolved install path, so nothing is hardcoded.
 - **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
 - **`channel/server.mjs`** — MCP channel server, spawned per session by Claude Code. Declares `claude/channel`, connects outward to the daemon's SSE endpoint keyed by its claude PID, and forwards each pushed Slack message into the session as a channel event. No reply tool: outbound mirroring is done by hooks, so responses are verbatim and cost no extra model turns.
 - **`daemon/daemon.mjs`** (+ `slackout.mjs`, `util.mjs`) — everything else.
@@ -61,4 +61,4 @@ Slack (private channels, Socket Mode)
 ## Known taxes / deferred
 
 - Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.
-- Deferred to v2: streaming responses (chat.startStream — proven, not wired), permission relay for non-dsp sessions, file upload for >40k outputs, Barrique registry integration for richer channel names.
+- Deferred to v2: streaming responses (chat.startStream — proven, not wired), permission relay for non-dsp sessions, file upload for >40k outputs, worktree-registry integration for richer channel names (e.g. issue numbers).

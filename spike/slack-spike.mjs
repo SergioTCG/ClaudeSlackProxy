@@ -77,7 +77,7 @@ await step('table block', async () => {
         type: 'table',
         rows: [
           [{ type: 'raw_text', text: 'Session' }, { type: 'raw_text', text: 'Branch' }, { type: 'raw_text', text: 'State' }],
-          [{ type: 'raw_text', text: 'barrique-wt3' }, { type: 'raw_text', text: 'notif-fixes' }, { type: 'raw_text', text: 'active' }],
+          [{ type: 'raw_text', text: 'myrepo-wt3' }, { type: 'raw_text', text: 'notif-fixes' }, { type: 'raw_text', text: 'active' }],
           [{ type: 'raw_text', text: 'caviste-main' }, { type: 'raw_text', text: 'main' }, { type: 'raw_text', text: 'dormant' }],
         ],
       },
