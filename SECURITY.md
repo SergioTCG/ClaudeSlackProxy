@@ -47,6 +47,7 @@ you need stability.
 
 ## Reporting a vulnerability
 
-Please report security issues privately to sergej.berisaj@25seven.si rather than
-opening a public issue. This is a personal open-source project maintained on a
-best-effort basis; there is no formal SLA.
+Please report security issues privately via GitHub's **Report a vulnerability**
+button (the repository's Security tab) rather than opening a public issue. This
+is a personal open-source project maintained on a best-effort basis; there is no
+formal SLA.

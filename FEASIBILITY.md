@@ -102,11 +102,11 @@ Revised spike list and **results (2026-07-21 evening, empirical, on 2.1.216 / Ma
    - Counterpart finding: in headless `-p` mode (stream-json long-lived), events were **silently dropped** (consent dialog can't render). Irrelevant to design v2 (interactive-only), but rules out headless shortcuts.
 2. ✅ **Ghostty programmatic spawn: PROVEN** (`open -na Ghostty.app --args -e zsh -lc "<cmd>"` ran a command and wrote a proof marker; window self-closed). **Caveat discovered:** `--working-directory` was ignored in combination with `-e` — the wrapper must `cd <dir> &&` inside the `-lc` command string.
 3. ⬜ Resume-with-same-session-id via spawned Ghostty — deferred to build phase (low risk: same-ID resume is documented and transcript-verified).
-4. ✅ **Slack side: ALL GREEN** (`spike/slack-spike.mjs`, run 2026-07-21 18:30 against the real "Twenty Five Seven d.o.o." workspace). auth ✓, private-channel create ✓, invite ✓, bot rename ✓, postMessage ✓, edit-in-place chat.update ✓, **native table block ✓**, Socket Mode connect + live event round-trip ✓.
+4. ✅ **Slack side: ALL GREEN** (`spike/slack-spike.mjs`, run 2026-07-21 18:30 against a real multi-person workspace). auth ✓, private-channel create ✓, invite ✓, bot rename ✓, postMessage ✓, edit-in-place chat.update ✓, **native table block ✓**, Socket Mode connect + live event round-trip ✓.
 5. ✅ **Both flagged ambiguities resolved positively**: `assistant.threads.setStatus` ("is thinking…") works in a regular private channel with plain `chat:write`, and `chat.startStream`/`appendStream`/`stopStream` streamed markdown into a thread there (recipient params required, as documented). Real incremental streaming is available — the chat.update fallback is not needed.
 6. ⬜ `./model` injection candidates — untested (build-phase item, with resume-flow verification).
 
-Operational facts captured: workspace is a real 35-person company org → **private channels are mandatory** and all inbound gating is on Sergej's user ID `U31GW5C6Q` (team `T31H77NMT`); both stored in `spike/.env` with the tokens. Lesson from the run: never "pick first human" — the spike initially invited the wrong member (fixed: invited Sergej, removed her).
+Operational facts captured: workspace is a real multi-person org → **private channels are mandatory** and all inbound gating is on a single Slack user ID (`<your-user-id>`, team `<your-team-id>`); both stored in the local env file with the tokens. Lesson from the run: never "pick first human" — the spike initially invited the wrong member (fixed: invited Sergej, removed her).
 
 ## Sources (primary)
 

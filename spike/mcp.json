@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "sptest": {
-      "command": "node",
-      "args": ["/Users/sergej/Code/ClaudeSlackProxy/spike/server.mjs"]
-    }
-  }
-}
