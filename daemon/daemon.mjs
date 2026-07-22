@@ -8,7 +8,8 @@ import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
-  tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste, ghosttySpawn,
+  tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxHasClient, tmuxInterrupt, tmuxPaste,
+  ghosttySpawn, ghosttyAttach,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -402,9 +403,21 @@ const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kil
 
 // Deliver text into a session: prefer a tmux paste (full text shows in the TUI),
 // fall back to a channel event, and resurrect the session if it's gone.
+const attaching = new Set()
 async function injectText(session, text) {
   const alive = session.pid && pidAlive(session.pid)
   if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
+    // Terminal invariant: if the window was closed (tmux alive but detached),
+    // reopen a visible Ghostty attached to the still-running session before injecting.
+    if (!(await tmuxHasClient(session.tmux)) && !attaching.has(session.tmux)) {
+      attaching.add(session.tmux)
+      log('reattach', session.id.slice(0, 8), session.tmux)
+      await post(session.channel, '🖥️ *Reopening the terminal* on the Mac (session still running)…')
+      try { await ghosttyAttach(session.tmux, path.basename(session.cwd)) } catch (e) { log('attach failed', String(e)) }
+      await sleep(1800)
+      attaching.delete(session.tmux)
+      session.detachedNotified = false
+    }
     rememberInjected(session.id, text)
     try {
       await tmuxPaste(session.tmux, text)
@@ -755,6 +768,18 @@ setInterval(async () => {
         } else log('sweep post error:', e?.data?.error || String(e))
       }
       saveState(state)
+    } else if (s.pid && pidAlive(s.pid) && s.tmux && s.channel) {
+      // Alive but the window may have been closed (tmux detached). Notify once on
+      // the attached→detached transition so a closed window doesn't go silent.
+      const attached = await tmuxHasClient(s.tmux)
+      if (attached) {
+        s.wasAttached = true
+        if (s.detachedNotified) { s.detachedNotified = false; saveState(state) }
+      } else if (s.wasAttached && !s.detachedNotified) {
+        s.detachedNotified = true
+        saveState(state)
+        await post(s.channel, '🖥️ *Terminal closed* on the Mac — the session is still running; write here to reopen it.').catch(() => {})
+      }
     }
   }
 }, 30000)

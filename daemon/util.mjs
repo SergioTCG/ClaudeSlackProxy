@@ -148,6 +148,18 @@ export async function tmuxCapture(tname) {
   try { return (await execFile('tmux', ['capture-pane', '-t', tname, '-p'])).stdout } catch { return '' }
 }
 
+// True if a terminal is attached to the tmux session (i.e. a visible window exists).
+export async function tmuxHasClient(tname) {
+  try { return (await execFile('tmux', ['list-clients', '-t', tname])).stdout.trim().length > 0 } catch { return false }
+}
+
+// Open a Ghostty window attached to an already-running tmux session (window was closed).
+export async function ghosttyAttach(tmuxName, title) {
+  const inner = `exec tmux attach-session -t ${shq(tmuxName)}`
+  await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title || tmuxName}`, '-e', 'zsh', '-lc', inner])
+  log('ghostty attach', tmuxName)
+}
+
 // Send Escape — Claude Code's interrupt key — to abort the running turn.
 export async function tmuxInterrupt(tname) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Escape'])
