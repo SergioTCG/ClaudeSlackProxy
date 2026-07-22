@@ -376,6 +376,17 @@ function resumeArgs(session) {
 }
 
 async function resurrect(session, text) {
+  // Claude Code scopes --resume to the cwd's project, so the folder must exist at
+  // its original path. If it's gone (e.g. a deleted worktree), recreate it empty —
+  // the transcript in ~/.claude/projects survives, so the conversation resumes.
+  if (!fs.existsSync(session.cwd)) {
+    try {
+      fs.mkdirSync(session.cwd, { recursive: true })
+      await post(session.channel, `⚠️ Folder \`${session.cwd}\` was gone — recreated it empty and resuming there. The conversation is intact; files from the original folder are not.`)
+    } catch (e) {
+      return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`claude --resume ${session.id}\` from a valid directory.`)
+    }
+  }
   await post(session.channel, '⏳ *Waking this session up on the Mac…*')
   const args = resumeArgs(session)
   const tmuxName = `ccs-res-${Date.now().toString(36)}`

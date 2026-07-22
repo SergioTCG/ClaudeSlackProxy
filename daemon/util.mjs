@@ -178,7 +178,7 @@ export async function tmuxSendCommand(tname, slashCommand) {
 
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
-  const inner = `cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
+  const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
   await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
