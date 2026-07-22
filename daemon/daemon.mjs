@@ -7,7 +7,7 @@ import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
-  resolveClaudePid, pidAlive, gitInfo, gitStatusText, channelName,
+  resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
@@ -86,12 +86,34 @@ async function ensureChannel(session) {
   }
   const ch = created.channel.id
   session.channel = ch
+  session.worktree = worktree
   state.channels[ch] = session.id
   saveState(state)
   try { await web.conversations.invite({ channel: ch, users: USER }) } catch {}
-  try { await web.conversations.setTopic({ channel: ch, topic: `${session.cwd} · ${branch || 'no-branch'}${worktree ? ' · wt:' + worktree : ''}` }) } catch {}
+  await updateTopic(session)
   await post(ch, `🟢 *Session started*\n\`${session.cwd}\`\nBranch: \`${branch || '—'}\` · Session \`${session.id.slice(0, 8)}\``)
   return ch
+}
+
+// Reactive channel topic: folder · branch · model · effort. Deduped, so Slack is
+// only called when something actually changes. Driven by the statusline feed
+// (model/effort/cwd) plus a live branch check.
+const lastTopic = new Map() // channel → last topic string
+const lastTopicAt = new Map() // channel → last rebuild time
+async function updateTopic(session) {
+  if (!session.channel) return
+  const meta = sessionMeta.get(session.id) || {}
+  const branch = await gitBranch(session.cwd)
+  const topic = [
+    session.cwd,
+    branch || 'no-branch',
+    session.worktree ? 'wt:' + session.worktree : '',
+    meta.model, meta.effort,
+  ].filter(Boolean).join(' · ')
+  if (topic === lastTopic.get(session.channel)) return
+  lastTopic.set(session.channel, topic)
+  try { await web.conversations.setTopic({ channel: session.channel, topic: topic.slice(0, 250) }) }
+  catch (e) { log('setTopic error', e?.data?.error || String(e)) }
 }
 
 // ---- status line (edit-in-place) -------------------------------------------
@@ -613,13 +635,23 @@ http.createServer(async (req, res) => {
       const j = JSON.parse(body)
       if (j.session_id) {
         const prev = sessionMeta.get(j.session_id) || {}
-        sessionMeta.set(j.session_id, {
+        const next = {
           ...prev,
           model: j.model?.display_name || prev.model,
           effort: j.effort?.level || prev.effort,
           ctxPct: j.context_window?.used_percentage ?? prev.ctxPct,
           cost: j.cost?.total_cost_usd ?? prev.cost,
-        })
+        }
+        sessionMeta.set(j.session_id, next)
+        const session = state.sessions[j.session_id]
+        if (session?.channel) {
+          if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
+          const changed = prev.model !== next.model || prev.effort !== next.effort
+          if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
+            lastTopicAt.set(session.channel, Date.now())
+            await updateTopic(session)
+          }
+        }
       }
     } catch {}
     return

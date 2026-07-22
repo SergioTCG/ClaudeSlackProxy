@@ -118,6 +118,11 @@ export async function gitStatusText(cwd) {
   try { return (await execFile('git', ['-C', cwd, 'status', '--short'])).stdout.trim() } catch { return '' }
 }
 
+export async function gitBranch(cwd) {
+  // --show-current handles an unborn branch (fresh repo, no commits); rev-parse HEAD doesn't.
+  try { return (await execFile('git', ['-C', cwd, 'branch', '--show-current'])).stdout.trim() } catch { return '' }
+}
+
 export function channelName(repo, branch, worktree) {
   const d = new Date()
   const pad = n => String(n).padStart(2, '0')
