@@ -46,6 +46,7 @@ features:
 oauth_config:
   scopes:
     bot:
+      - commands          # register /cc-* slash commands
       - chat:write        # post/update messages, streaming, setStatus (since 2026-03)
       - channels:manage   # create/rename public channels
       - channels:read

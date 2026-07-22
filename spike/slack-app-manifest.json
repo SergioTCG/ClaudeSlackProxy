@@ -24,6 +24,7 @@
   "oauth_config": {
     "scopes": {
       "bot": [
+        "commands",
         "chat:write",
         "channels:manage",
         "channels:read",

@@ -7,7 +7,7 @@ import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
-  resolveClaudePid, pidAlive, gitInfo, channelName,
+  resolveClaudePid, pidAlive, gitInfo, gitStatusText, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
@@ -444,19 +444,84 @@ async function handleAttachments(channel, caption, files) {
   await injectText(session, body)
 }
 
+const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
+
+// Read the session's model from its transcript init record (first "model" field).
+function readModel(session) {
+  try {
+    const fd = fs.openSync(session.transcript, 'r')
+    const buf = Buffer.alloc(65536)
+    const n = fs.readSync(fd, buf, 0, 65536, 0)
+    fs.closeSync(fd)
+    const m = buf.toString('utf8', 0, n).match(/"model":"([^"]+)"/)
+    if (m) return m[1]
+  } catch {}
+  return null
+}
+
+async function spawnNew(channel, dir, extraFlags) {
+  const cwd = path.resolve(dir.replace(/^~/, process.env.HOME))
+  if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
+  const flags = []
+  for (const f of extraFlags) {
+    const norm = FLAG_ALIAS[f] || f
+    if (ALLOWED_FLAGS.has(norm.split('=')[0])) flags.push(norm)
+    else return post(channel, `❌ Flag not allowed: \`${f}\``)
+  }
+  const tmuxName = `ccs-new-${Date.now().toString(36)}`
+  await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`…`)
+  await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
+}
+
+const codeDir = () => process.env.CCS_CODE_DIR || path.join(process.env.HOME, 'Code')
+async function postFolderPicker(channel) {
+  const base = codeDir()
+  let dirs = []
+  try { dirs = fs.readdirSync(base, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort() } catch {}
+  if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`/cc-new <folder>\`.`)
+  const options = dirs.slice(0, 100).map(d => ({ text: { type: 'plain_text', text: d.slice(0, 75) }, value: d.slice(0, 75) }))
+  await web.chat.postMessage({
+    channel, text: 'Pick a project to start a session in',
+    blocks: [{
+      type: 'section', text: { type: 'mrkdwn', text: `*Start a session* — pick a project in \`${base}\`:` },
+      accessory: { type: 'static_select', action_id: 'ccnew_folder', placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
+    }],
+  })
+}
+
+// ./name (message) routes here; /cc-name (slash) calls dispatch() directly.
 async function handleCommand(channel, cmd) {
   const [name, ...rest] = cmd.slice(2).split(/\s+/)
+  return dispatch(name, rest, channel)
+}
+async function dispatch(name, rest, channel) {
   if (name === 'help') {
     return post(channel,
-      '*Commands*\n' +
-      '`./new <dir> [--dsp] [--chrome] [--model X]` — spawn a session\n' +
-      '`./model <m>` · `./effort <e>` — send to a session\n' +
-      '`./stop` — interrupt the running turn\n' +
-      '`./status` — list sessions · `./health` — bridge status\n' +
-      '`./kill [here|<id>]` — end a session (channel stays, resumable)\n' +
-      '`./cleanup` — archive dormant channels (run from control channel)')
+      '*Commands* — use `/cc-<name>` (autocompletes as you type `/cc-`)\n' +
+      '`/cc-new [folder] [--dsp] [--chrome]` — start a session (no arg = pick a project)\n' +
+      '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg = show current)\n' +
+      '`/cc-stop` — interrupt the running turn\n' +
+      '`/cc-status` — session info here, or all sessions from the control channel\n' +
+      '`/cc-health` — bridge status\n' +
+      '`/cc-kill [here|<id>]` — end a session (channel stays, resumable)\n' +
+      '`/cc-cleanup` — archive dormant channels')
   }
   if (name === 'status') {
+    const session = channel !== state.control ? sessionByChannel(channel) : null
+    if (session) {
+      const { branch, worktree } = await gitInfo(session.cwd)
+      const gs = await gitStatusText(session.cwd)
+      const alive = session.pid && pidAlive(session.pid)
+      const meta = sessionMeta.get(session.id) || {}
+      return postMd(channel,
+        `*Session \`${session.id.slice(0, 8)}\`* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
+        `| Field | Value |\n|---|---|\n` +
+        `| Folder | \`${session.cwd}\` |\n` +
+        `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
+        `| Model | ${meta.model || readModel(session) || '—'} |\n` +
+        `| Effort | ${meta.effort || '—'} |\n` +
+        (gs ? '\n```\n' + gs.slice(0, 1500) + '\n```' : ''))
+    }
     const rows = Object.values(state.sessions).map(s => {
       const alive = s.pid && pidAlive(s.pid)
       return `| ${path.basename(s.cwd)} | ${s.id.slice(0, 8)} | ${alive ? '🟢 active' : '💤 dormant'} |`
@@ -501,34 +566,29 @@ async function handleCommand(channel, cmd) {
   }
   if (name === 'model' || name === 'effort') {
     const session = sessionByChannel(channel)
-    if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, `Can't send \`/${name}\` — session not active. Send a message first to wake it.`)
+    if (!session) return post(channel, `Use \`/cc-${name}\` in a session channel.`)
+    const meta = sessionMeta.get(session.id) || {}
+    if (!rest.length) {
+      const cur = name === 'model' ? (meta.model || readModel(session) || 'unknown') : (meta.effort || 'unknown')
+      const opts = name === 'model' ? 'sonnet · opus · haiku · fable' : 'low · medium · high · max'
+      return post(channel, `*${name}*: \`${cur}\`\nSet with \`/cc-${name} <value>\`  (${opts})`)
+    }
+    if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
     await tmuxSendCommand(session.tmux, `/${name} ${rest.join(' ')}`)
-    return post(channel, `↪️ sent \`/${name} ${rest.join(' ')}\` to the session`)
+    sessionMeta.set(session.id, { ...meta, [name]: rest.join(' ') })
+    return post(channel, `✅ ${name} → \`${rest.join(' ')}\``)
   }
   if (name === 'stop') {
     const session = sessionByChannel(channel)
-    if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, "No active session here to interrupt.")
+    if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
     await tmuxInterrupt(session.tmux)
-    return post(channel, "⎋ *Interrupted* the running turn.")
+    return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'new') {
-    const dir = rest[0]
-    if (!dir) return post(channel, 'Usage: `./new <dir> [flags]`')
-    const cwd = path.resolve(dir.replace(/^~/, process.env.HOME))
-    if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
-    const flags = []
-    for (const f of rest.slice(1)) {
-      const norm = FLAG_ALIAS[f] || f
-      const base = norm.split('=')[0]
-      if (ALLOWED_FLAGS.has(base)) flags.push(norm)
-      else return post(channel, `❌ Flag not allowed: \`${f}\``)
-    }
-    const tmuxName = `ccs-new-${Date.now().toString(36)}`
-    await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`…`)
-    await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
-    return
+    if (!rest.length) return postFolderPicker(channel)
+    return spawnNew(channel, rest[0], rest.slice(1))
   }
-  return post(channel, `Unknown command: \`./${name}\`. Try \`./help\`.`)
+  return post(channel, `Unknown command: \`${name}\`. Try \`/cc-help\`.`)
 }
 
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------
@@ -593,15 +653,34 @@ sm.on('message', async ({ event, ack }) => {
   } catch (e) { log('slack msg error', String(e)) }
 })
 
-// Approve/Deny button taps arrive as interactive (block_actions) envelopes.
+// Native /cc-* slash commands (registered in the manifest, delivered over the socket).
+sm.on('slash_commands', async ({ body, ack }) => {
+  try { await ack() } catch {}
+  try {
+    if (body.user_id !== USER) return
+    const name = String(body.command || '').replace(/^\/cc-/, '')
+    const rest = String(body.text || '').trim().split(/\s+/).filter(Boolean)
+    log('slash', body.command, JSON.stringify(body.text || ''))
+    await dispatch(name, rest, body.channel_id)
+  } catch (e) { log('slash error', String(e)) }
+})
+
+// Interactive components: Approve/Deny buttons and the /cc-new folder picker.
 sm.on('interactive', async ({ body, ack }) => {
   try { await ack() } catch {}
   try {
     if (body?.type !== 'block_actions' || body.user?.id !== USER) return
     const action = body.actions?.[0]
-    if (!action?.value) return
-    const [behavior, rid] = String(action.value).split(':')
-    await applyVerdict(rid, behavior, body.channel?.id, body.message?.ts)
+    if (!action) return
+    if (action.action_id === 'ccnew_folder') {
+      const folder = action.selected_option?.value
+      if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), ['--dangerously-skip-permissions'])
+      return
+    }
+    if (action.value) {
+      const [behavior, rid] = String(action.value).split(':')
+      await applyVerdict(rid, behavior, body.channel?.id, body.message?.ts)
+    }
   } catch (e) { log('interactive error', String(e)) }
 })
 

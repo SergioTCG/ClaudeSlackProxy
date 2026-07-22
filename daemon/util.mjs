@@ -114,6 +114,10 @@ export async function gitInfo(cwd) {
   return { repo, branch, worktree }
 }
 
+export async function gitStatusText(cwd) {
+  try { return (await execFile('git', ['-C', cwd, 'status', '-sb'])).stdout.trim() } catch { return '' }
+}
+
 export function channelName(repo, branch, worktree) {
   const d = new Date()
   const pad = n => String(n).padStart(2, '0')
