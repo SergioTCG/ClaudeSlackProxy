@@ -115,7 +115,7 @@ export async function gitInfo(cwd) {
 }
 
 export async function gitStatusText(cwd) {
-  try { return (await execFile('git', ['-C', cwd, 'status', '-sb'])).stdout.trim() } catch { return '' }
+  try { return (await execFile('git', ['-C', cwd, 'status', '--short'])).stdout.trim() } catch { return '' }
 }
 
 export function channelName(repo, branch, worktree) {

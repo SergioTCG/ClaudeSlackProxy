@@ -513,14 +513,17 @@ async function dispatch(name, rest, channel) {
       const gs = await gitStatusText(session.cwd)
       const alive = session.pid && pidAlive(session.pid)
       const meta = sessionMeta.get(session.id) || {}
+      const changes = gs ? `${gs.split('\n').length} file(s) changed` : '✓ clean'
+      // Table cells are raw text (no markdown), so no backticks here.
       return postMd(channel,
-        `*Session \`${session.id.slice(0, 8)}\`* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
+        `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
         `| Field | Value |\n|---|---|\n` +
-        `| Folder | \`${session.cwd}\` |\n` +
+        `| Folder | ${session.cwd} |\n` +
         `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
         `| Model | ${meta.model || readModel(session) || '—'} |\n` +
         `| Effort | ${meta.effort || '—'} |\n` +
-        (gs ? '\n```\n' + gs.slice(0, 1500) + '\n```' : ''))
+        `| Changes | ${changes} |` +
+        (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
     }
     const rows = Object.values(state.sessions).map(s => {
       const alive = s.pid && pidAlive(s.pid)
@@ -600,6 +603,25 @@ http.createServer(async (req, res) => {
     res.end('ok')
     try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux')) }
     catch (e) { log('hook error', String(e)) }
+    return
+  }
+  if (url.pathname === '/statusline' && req.method === 'POST') {
+    let body = ''
+    for await (const c of req) body += c
+    res.end('ok')
+    try {
+      const j = JSON.parse(body)
+      if (j.session_id) {
+        const prev = sessionMeta.get(j.session_id) || {}
+        sessionMeta.set(j.session_id, {
+          ...prev,
+          model: j.model?.display_name || prev.model,
+          effort: j.effort?.level || prev.effort,
+          ctxPct: j.context_window?.used_percentage ?? prev.ctxPct,
+          cost: j.cost?.total_cost_usd ?? prev.cost,
+        })
+      }
+    } catch {}
     return
   }
   if (url.pathname === '/permission-request' && req.method === 'POST') {
