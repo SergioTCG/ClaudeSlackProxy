@@ -4,6 +4,40 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-07-22
+
+Native Slack slash commands, real-time status, and a reactive channel topic.
+
+### Added
+- **Native `/cc-*` slash commands** with command autocomplete, replacing the
+  `./`-prefixed messages: `/cc-model`, `/cc-effort`, `/cc-new`, `/cc-status`,
+  `/cc-health`, `/cc-stop`, `/cc-kill`, `/cc-cleanup`, `/cc-help`.
+- `/cc-new` posts a project picker (dropdown of `CCS_CODE_DIR`); `/cc-model` and
+  `/cc-effort` show the current value with no argument or set it with one.
+- `/cc-status` in a session channel shows folder, branch, live git status,
+  model, and effort; in the control channel it lists all sessions.
+- **Live real-time status**: while a turn runs, the terminal's spinner (verb +
+  elapsed + tokens) mirrors into an edit-in-place Slack message and clears when
+  the turn ends.
+- **Interrupt** a running turn from Slack (`/cc-stop`, via tmux Escape).
+- **Reactive channel topic** — `folder · branch · model · effort`, updated as
+  the session changes (deduped so Slack is only called on a real change).
+- Statusline integration: `hooks/statusline.sh` forwards Claude Code's
+  documented status JSON (model, effort, tokens, cost) to the daemon.
+
+### Fixed
+- Critical: the daemon crash-looped when a timer posted to an archived channel
+  (unhandled rejection). Added global crash guards so no single Slack API error
+  can take the daemon down.
+- System task-notifications were mirrored as fake "You typed" messages; filtered.
+- `loadEnv` merges the config env and repo `.env` so a partial config file no
+  longer masks tokens.
+
+### Changed
+- `./`-prefixed commands remain as a deprecated fallback for the native `/cc-*`.
+
+[0.2.0]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.0
+
 ## [0.1.0] — 2026-07-21
 
 First public release.
