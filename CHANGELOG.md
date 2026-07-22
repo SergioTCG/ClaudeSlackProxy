@@ -33,8 +33,9 @@ Native Slack slash commands, real-time status, and a reactive channel topic.
 - `loadEnv` merges the config env and repo `.env` so a partial config file no
   longer masks tokens.
 
-### Changed
-- `./`-prefixed commands remain as a deprecated fallback for the native `/cc-*`.
+### Removed
+- The `./`-prefixed commands, superseded by the native `/cc-*` slash commands.
+  Typing `./model` (etc.) now returns a one-line hint pointing to `/cc-model`.
 
 [0.2.0]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.0
 

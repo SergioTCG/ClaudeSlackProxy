@@ -131,7 +131,10 @@ async function setStatus(session, text) {
       const r = await web.chat.postMessage({ channel: session.channel, text })
       statusTs.set(session.id, r.ts)
     }
-  } catch (e) { log('setStatus error:', e?.data?.error || String(e)) }
+  } catch (e) {
+    if (e?.data?.error === 'message_not_found') statusTs.delete(session.id) // stale ts (deleted); repost next tick
+    else log('setStatus error:', e?.data?.error || String(e))
+  }
 }
 async function clearStatus(session) {
   const ts = statusTs.get(session.id)
@@ -381,20 +384,21 @@ async function handleSlackMessage(channel, text) {
     return
   }
 
-  // commands
-  if (trimmed.startsWith('./')) {
-    log('command', channel, JSON.stringify(trimmed.slice(0, 60)))
-    return handleCommand(channel, trimmed)
+  // The ./ commands were retired in favour of native /cc-* slash commands; nudge.
+  const dot = /^\.\/(\w+)/.exec(trimmed)
+  if (dot && RETIRED_CMDS.has(dot[1])) {
+    return post(channel, `\`./\` commands are retired — use \`/cc-${dot[1]}\` instead (type \`/cc-\` for the list).`)
   }
 
   const session = sessionByChannel(channel)
   if (!session) {
-    if (channel === state.control) return post(channel, "This is the control channel. Try `./new <dir> [--dsp] [--chrome]` or `./status`.")
+    if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new` to start a session, or `/cc-status` to list them.')
     log('inbound (unmapped channel, ignored)', channel)
     return
   }
   await injectText(session, trimmed)
 }
+const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kill', 'cleanup', 'stop', 'help'])
 
 // Deliver text into a session: prefer a tmux paste (full text shows in the TUI),
 // fall back to a channel event, and resurrect the session if it's gone.
@@ -511,11 +515,7 @@ async function postFolderPicker(channel) {
   })
 }
 
-// ./name (message) routes here; /cc-name (slash) calls dispatch() directly.
-async function handleCommand(channel, cmd) {
-  const [name, ...rest] = cmd.slice(2).split(/\s+/)
-  return dispatch(name, rest, channel)
-}
+// Command dispatch for the native /cc-* slash commands.
 async function dispatch(name, rest, channel) {
   if (name === 'help') {
     return post(channel,
@@ -569,7 +569,7 @@ async function dispatch(name, rest, channel) {
     const target = rest[0] && rest[0] !== 'here'
       ? Object.values(state.sessions).find(s => s.id.startsWith(rest[0]))
       : sessionByChannel(channel)
-    if (!target) return post(channel, 'No matching session — use `./kill here` in a session channel, or `./kill <id-prefix>`.')
+    if (!target) return post(channel, 'No matching session — use `/cc-kill` in a session channel, or `/cc-kill <id-prefix>`.')
     if (target.tmux) await tmuxKill(target.tmux)
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
     await clearStatus(target)
@@ -768,7 +768,7 @@ setInterval(async () => {
       const c = await web.conversations.create({ name: 'claude-code-bridge', is_private: true })
       state.control = c.channel.id
       await web.conversations.invite({ channel: c.channel.id, users: USER })
-      await post(c.channel.id, '🤖 *Bridge online.* `./new <dir> [--dsp] [--chrome]`, `./status`, `./help`.')
+      await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for commands — `/cc-new` to start a session, `/cc-status`, `/cc-help`.')
     } catch (e) {
       if (e?.data?.error === 'name_taken') {
         const list = await web.conversations.list({ types: 'private_channel', limit: 200 })

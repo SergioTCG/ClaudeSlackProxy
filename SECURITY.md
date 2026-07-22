@@ -20,7 +20,7 @@ your Slack account and workspace, so treat it accordingly.
   workspace members can't see or post in them.
 - **Outbound-only networking.** The daemon uses Slack Socket Mode — an outbound
   WebSocket. It opens no inbound ports on your machine.
-- **Restricted spawning.** `./new` only launches sessions in directories under
+- **Restricted spawning.** `/cc-new` only launches sessions in directories under
   `$HOME` and only accepts an allowlisted set of CLI flags.
 - **Secrets stay local.** Tokens live in a local env file that is never
   committed (see `.gitignore`).

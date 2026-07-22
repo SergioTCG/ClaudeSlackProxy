@@ -35,20 +35,23 @@ Slack (private channels, Socket Mode)
 2. **JSON state file, not SQLite** — single-writer daemon, dozens of rows, human-inspectable, atomic tmp+rename. (Revised from the earlier SQLite suggestion; complexity wasn't buying anything.)
 3. **PID is the join key.** Hooks and the channel server both report their parent PID; the daemon walks ancestry to the owning `claude` process. This is how a hook event, an SSE connection, and a tmux name all attach to the same session — and how `/clear` (new session id, same process) keeps the same channel.
 4. **No archiving, ever** (design v2). Ended sessions → channel gets "💤 write here to resume". Message into a dormant channel → daemon spawns Ghostty+tmux+`ccs --resume <session-id>` in the stored cwd, queues the message, delivers it once the channel server reconnects.
-5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **slash commands** — `./model sonnet` / `./effort high` in Slack become `tmux send-keys "/model sonnet" Enter`.
+5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
 7. **Mirroring is hook-driven and token-free.** `UserPromptSubmit` mirrors your terminal-typed prompts; `Stop` reads the transcript from a per-session byte offset and posts new assistant text (markdown → Block Kit, tables → native table blocks); `PreToolUse` maintains one edited-in-place status line (`⏺ Bash — npm test…`), deleted on Stop. Slack-injected messages are deduped so they don't echo back.
-8. **Control channel** `#claude-code-bridge` — created by the daemon at startup for commands when no session channel exists yet: `./new <dir> [flags]`, `./status`, `./help`. Session channels accept plain messages (→ injection) plus `./model`, `./effort`, `./status`.
+8. **Control channel** `#claude-code-bridge` — created by the daemon at startup for commands when no session channel exists yet: `/cc-new`, `/cc-status`, `/cc-help`. Session channels accept plain messages (→ injection) plus the session-scoped commands (`/cc-model`, `/cc-effort`, `/cc-status`, `/cc-stop`, `/cc-kill`).
 
 ## Command grammar (Slack)
+
+Commands are native Slack slash commands (`slash_commands` events over Socket Mode), routed through a shared `dispatch()`. They were the `./`-prefixed messages before v0.2.0.
 
 | Command | Where | Effect |
 |---|---|---|
 | plain text | session channel | injected into the session (resurrects it first if needed) |
-| `./new <dir> [--dsp] [--chrome] [--model X] [--continue]` | anywhere | spawn Ghostty+tmux+ccs in `<dir>` (allowlisted flags only, dir must exist under `$HOME`) |
-| `./model <m>`, `./effort <e>` | session channel | `tmux send-keys` the real slash command |
-| `./status` | anywhere | table of all sessions and states |
-| `./help` | anywhere | command list |
+| `/cc-new [folder] [--dsp] [--chrome]` | anywhere | project-picker dropdown, or spawn Ghostty+tmux+ccs in `<folder>` (allowlisted flags, under `$HOME`) |
+| `/cc-model [m]`, `/cc-effort [e]` | session channel | show current value, or `tmux send-keys` the real slash command to set it |
+| `/cc-stop` | session channel | interrupt the running turn (`tmux send-keys Escape`) |
+| `/cc-status` | anywhere | session info in a session channel; table of all sessions from the control channel |
+| `/cc-health`, `/cc-kill`, `/cc-cleanup`, `/cc-help` | anywhere | bridge status, end a session, archive dormant channels, command list |
 
 ## Lifecycle (channel naming: `{repo}-{branch}-{yyyymmdd}-{hhmm}`)
 

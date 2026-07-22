@@ -49,18 +49,22 @@ ccs --dangerously-skip-permissions        # any claude flags pass through
 
 A private channel `#{repo}-{branch}-{timestamp}` appears and you're invited. Rename it freely — the mapping is by channel ID. Then, from Slack:
 
+Commands are native Slack slash commands — type `/cc-` and Slack autocompletes them:
+
 | In Slack | Effect |
 |---|---|
 | any message in a session channel | injected into that session (resurrects it if the terminal is gone) |
 | a file / image attachment | downloaded and handed to Claude as a local path to read |
-| `./new <dir> [--dsp] [--chrome] [--model X]` | spawn a new session (dirs under `$HOME`, allowlisted flags) |
-| `./model <m>` / `./effort <e>` | sent to the session as the real slash command |
-| `./status` · `./health` | list sessions · bridge status |
-| `./kill [here\|<id>]` | end a session (channel stays, resumable) |
-| `./cleanup` | archive dormant channels (from the control channel) |
+| `/cc-new [folder] [--dsp] [--chrome]` | start a session — no argument shows a project picker (dirs under `$HOME`) |
+| `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it |
+| `/cc-status` | session info here (folder, branch, git, model, effort), or all sessions from the control channel |
+| `/cc-health` | bridge status |
+| `/cc-stop` | interrupt the running turn |
+| `/cc-kill [<id>]` | end a session (channel stays, resumable) |
+| `/cc-cleanup` | archive dormant channels (from the control channel) |
 | a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or `yes <id>` / `no <id>` |
 
-Responses over ~6,000 chars upload as a `response.md` file. Consent dialogs are auto-dismissed. Sessions never archive on their own — a dormant channel says "write here to resume," and doing so spawns a Ghostty window and continues where you left off.
+While a turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into an edit-in-place status message, and the channel topic tracks `folder · branch · model · effort`. Responses over ~6,000 chars upload as a `response.md` file. Consent dialogs are auto-dismissed. Sessions never archive on their own — a dormant channel says "write here to resume," and doing so spawns a Ghostty window and continues where you left off.
 
 ## Operations
 
