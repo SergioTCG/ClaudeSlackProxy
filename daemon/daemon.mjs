@@ -227,7 +227,7 @@ function readNewAssistantText(session) {
 }
 
 // ---- hook handling ----------------------------------------------------------
-async function onHook(body, ppid, tmux) {
+async function onHook(body, ppid, tmux, flags) {
   const ev = body.hook_event_name
   const pid = await resolveClaudePid(ppid)
   if (!pid) return
@@ -250,6 +250,7 @@ async function onHook(body, ppid, tmux) {
   session.tmux = tmux || session.tmux
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
+  if (flags != null && flags !== '') session.launchFlags = flags
   saveState(state)
 
   if (ev === 'SessionStart') {
@@ -357,9 +358,26 @@ function injectToSession(pid, text) {
   return false
 }
 
+// Rebuild the launch args for a resume: replay the original flags (so
+// --dangerously-skip-permissions, --chrome, etc. are preserved), minus any
+// resume/continue flags, then add --resume <id>. Sessions launched before flag
+// capture fall back to the operator's usual flags (default: --dsp).
+function resumeArgs(session) {
+  const toks = (session.launchFlags || '').trim().split(/\s+/).filter(Boolean)
+  const keep = []
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]
+    if (t === '--resume' || t === '-r') { i++; continue } // drop --resume <id>
+    if (t === '--continue' || t === '-c') continue
+    keep.push(t)
+  }
+  if (!keep.length) keep.push(...(process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions').split(/\s+/).filter(Boolean))
+  return [...keep, '--resume', session.id]
+}
+
 async function resurrect(session, text) {
   await post(session.channel, '⏳ *Waking this session up on the Mac…*')
-  const args = ['--resume', session.id]
+  const args = resumeArgs(session)
   const tmuxName = `ccs-res-${Date.now().toString(36)}`
   session.tmux = tmuxName
   saveState(state)
@@ -625,7 +643,7 @@ http.createServer(async (req, res) => {
     let body = ''
     for await (const c of req) body += c
     res.end('ok')
-    try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux')) }
+    try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'), req.headers['x-ccs-flags']) }
     catch (e) { log('hook error', String(e)) }
     return
   }
