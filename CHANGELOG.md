@@ -4,6 +4,19 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-07-22
+
+### Fixed
+- **Resume a session whose folder was deleted** (e.g. a removed git worktree)
+  instead of failing silently. Claude Code scopes `--resume` to the folder's
+  project and the spawn did `cd <folder>` first, so a missing folder made the
+  window close instantly with the message lost. The transcript survives in
+  `~/.claude/projects`, so the daemon now recreates the folder empty at its
+  original path and resumes there (with a warning). The conversation is
+  preserved; files from the deleted folder are not.
+
+[0.2.2]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.2
+
 ## [0.2.1] — 2026-07-22
 
 Terminal-lifecycle correctness fixes.
