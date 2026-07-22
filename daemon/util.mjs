@@ -17,13 +17,19 @@ export const log = (...a) => console.log(new Date().toISOString().slice(11, 19),
 export const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 export function loadEnv() {
+  // Load config env first (takes precedence), then the repo .env fills any gaps.
+  // Merging avoids a partial ~/.config/ccs/env masking tokens still in .env.
   const candidates = [path.join(CONFIG_DIR, 'env'), path.join(BRIDGE, '.env')]
-  const f = candidates.find(p => fs.existsSync(p))
-  if (!f) throw new Error(`no env file found (looked in: ${candidates.join(', ')})`)
-  for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
-    const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
+  let found = false
+  for (const f of candidates) {
+    if (!fs.existsSync(f)) continue
+    found = true
+    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+      const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
+    }
   }
+  if (!found) throw new Error(`no env file found (looked in: ${candidates.join(', ')})`)
 }
 
 // ---- state ------------------------------------------------------------------
@@ -127,6 +133,15 @@ export async function tmuxAlive(tname) {
 
 export async function tmuxKill(tname) {
   try { await execFile('tmux', ['kill-session', '-t', tname]) } catch {}
+}
+
+export async function tmuxCapture(tname) {
+  try { return (await execFile('tmux', ['capture-pane', '-t', tname, '-p'])).stdout } catch { return '' }
+}
+
+// Send Escape — Claude Code's interrupt key — to abort the running turn.
+export async function tmuxInterrupt(tname) {
+  await execFile('tmux', ['send-keys', '-t', tname, 'Escape'])
 }
 
 // Inject a full message into the session's input box as a bracketed paste,

@@ -12,6 +12,37 @@ features:
   bot_user:
     display_name: claude-code
     always_online: true
+  slash_commands:
+    - command: /cc-model
+      description: Show this session's model, or set it
+      usage_hint: "[sonnet | opus | haiku | fable]"
+      should_escape: false
+    - command: /cc-effort
+      description: Show this session's effort level, or set it
+      usage_hint: "[low | medium | high | max]"
+      should_escape: false
+    - command: /cc-new
+      description: Start a new Claude Code session (pick a project)
+      usage_hint: "[folder] [--dsp] [--chrome]"
+      should_escape: false
+    - command: /cc-status
+      description: Session info here, or all sessions from the control channel
+      should_escape: false
+    - command: /cc-health
+      description: Bridge daemon health
+      should_escape: false
+    - command: /cc-cleanup
+      description: Archive dormant session channels
+      should_escape: false
+    - command: /cc-stop
+      description: Interrupt the running turn in this session
+      should_escape: false
+    - command: /cc-kill
+      description: End this session (channel stays, resumable)
+      should_escape: false
+    - command: /cc-help
+      description: List bridge commands
+      should_escape: false
 oauth_config:
   scopes:
     bot:

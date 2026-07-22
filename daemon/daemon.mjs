@@ -8,7 +8,7 @@ import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, channelName,
-  tmuxSendCommand, tmuxAlive, tmuxKill, tmuxPaste, ghosttySpawn,
+  tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste, ghosttySpawn,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -19,6 +19,11 @@ const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 const BOOT_TS = Date.now()
+
+// Safety net: a single Slack API error (e.g. posting to an archived channel from
+// a timer) must never crash the long-running daemon.
+process.on('unhandledRejection', e => log('unhandledRejection:', e?.data?.error || e?.stack || String(e)))
+process.on('uncaughtException', e => log('uncaughtException:', e?.stack || String(e)))
 
 // pid → { res } live SSE connections from channel servers
 const streams = new Map()
@@ -90,24 +95,63 @@ async function ensureChannel(session) {
 }
 
 // ---- status line (edit-in-place) -------------------------------------------
+// The live status message ts is keyed by session id in a daemon-level map, not on
+// the session object — the poller and the Stop handler may hold different object
+// references for the same session, so a shared key avoids a stale/orphaned message.
+const statusTs = new Map() // sid → ts
 async function setStatus(session, text) {
   if (!session.channel) return
+  const ts = statusTs.get(session.id)
   try {
-    if (session.statusTs) {
-      await web.chat.update({ channel: session.channel, ts: session.statusTs, text })
+    if (ts) {
+      await web.chat.update({ channel: session.channel, ts, text })
     } else {
       const r = await web.chat.postMessage({ channel: session.channel, text })
-      session.statusTs = r.ts
-      saveState(state)
+      statusTs.set(session.id, r.ts)
     }
-  } catch {}
+  } catch (e) { log('setStatus error:', e?.data?.error || String(e)) }
 }
 async function clearStatus(session) {
-  if (session.channel && session.statusTs) {
-    try { await web.chat.delete({ channel: session.channel, ts: session.statusTs }) } catch {}
-    session.statusTs = null
-    saveState(state)
+  const ts = statusTs.get(session.id)
+  if (session.channel && ts) {
+    try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
+    statusTs.delete(session.id)
   }
+}
+
+// ---- live status poller -----------------------------------------------------
+// While a turn runs, mirror the terminal's spinner line (verb + elapsed + tokens)
+// into the edit-in-place status message. Reads rendered pane output, not internals.
+const pollers = new Map() // sid → { timer, last }
+function extractSpinner(pane) {
+  const lines = pane.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // e.g. "✶ Newspapering… (8s · ↓ 487 tokens · thought for 1s)"
+    const m = lines[i].match(/([A-Za-z][A-Za-z ]*…\s*\(.*?\))/)
+    if (m) return '⚙️ ' + m[1].replace(/\s+/g, ' ').trim()
+  }
+  return null
+}
+function startPoller(session) {
+  if (pollers.has(session.id)) return
+  const p = { timer: null, last: '', stopped: false }
+  p.timer = setInterval(async () => {
+    if (p.stopped || !session.tmux || !(session.pid && pidAlive(session.pid))) return
+    const line = extractSpinner(await tmuxCapture(session.tmux))
+    if (p.stopped) return // Stop fired during the capture — don't re-post
+    if (line && line !== p.last) { p.last = line; await setStatus(session, line) }
+  }, 3000)
+  pollers.set(session.id, p)
+}
+function stopPoller(session) {
+  const p = pollers.get(session.id)
+  if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
+}
+
+// System-injected prompts (task notifications, reminders, local-command echoes)
+// arrive via UserPromptSubmit but aren't genuine typing — don't mirror them.
+function isSystemPrompt(p) {
+  return /SYSTEM NOTIFICATION|task-notification|<system-reminder>|<command-name>|<local-command|Caveat: The messages below/i.test(p)
 }
 
 // ---- transcript mirroring ---------------------------------------------------
@@ -205,25 +249,24 @@ async function onHook(body, ppid, tmux) {
   if (ev === 'UserPromptSubmit') {
     const ch = session.channel || (await ensureChannel(session))
     const p = (body.prompt || '').trim()
-    // Skip prompts we injected from Slack (tmux paste = exact text match;
-    // channel-event fallback = wrapped in <channel source="slack-bridge">).
-    if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"')) {
+    // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
+    // system-injected content (task notifications, reminders, local-command echoes).
+    if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
+    startPoller(session) // live spinner status while the turn runs
     return
   }
   if (ev === 'PreToolUse') {
     // Stream out any prose Claude wrote before this tool call, so the channel
-    // shows the turn unfolding instead of one dump at Stop. Clear the old status
-    // first so a fresh "doing X now" line stays the newest message.
+    // shows the turn unfolding. Clearing the status lets the poller repost the
+    // live spinner below the new prose on its next tick.
     const text = readNewAssistantText(session)
     if (text) { await clearStatus(session); await postMd(session.channel, text) }
-    const name = body.tool_name || 'tool'
-    const detail = body.tool_input?.command || body.tool_input?.file_path || body.tool_input?.description || ''
-    await setStatus(session, `⏺ ${name}${detail ? ' — ' + String(detail).slice(0, 80) : ''}…`)
     return
   }
   if (ev === 'Stop') {
+    stopPoller(session)
     await clearStatus(session)
     if (session.transcript) await waitTranscriptSettle(session.transcript)
     const text = readNewAssistantText(session)
@@ -232,6 +275,7 @@ async function onHook(body, ppid, tmux) {
     return
   }
   if (ev === 'SessionEnd') {
+    stopPoller(session)
     await clearStatus(session)
     if (session.channel) await post(session.channel, '💤 *Session ended* — write here to resume it')
     session.pid = null
@@ -407,6 +451,7 @@ async function handleCommand(channel, cmd) {
       '*Commands*\n' +
       '`./new <dir> [--dsp] [--chrome] [--model X]` — spawn a session\n' +
       '`./model <m>` · `./effort <e>` — send to a session\n' +
+      '`./stop` — interrupt the running turn\n' +
       '`./status` — list sessions · `./health` — bridge status\n' +
       '`./kill [here|<id>]` — end a session (channel stays, resumable)\n' +
       '`./cleanup` — archive dormant channels (run from control channel)')
@@ -459,6 +504,12 @@ async function handleCommand(channel, cmd) {
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, `Can't send \`/${name}\` — session not active. Send a message first to wake it.`)
     await tmuxSendCommand(session.tmux, `/${name} ${rest.join(' ')}`)
     return post(channel, `↪️ sent \`/${name} ${rest.join(' ')}\` to the session`)
+  }
+  if (name === 'stop') {
+    const session = sessionByChannel(channel)
+    if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, "No active session here to interrupt.")
+    await tmuxInterrupt(session.tmux)
+    return post(channel, "⎋ *Interrupted* the running turn.")
   }
   if (name === 'new') {
     const dir = rest[0]
@@ -559,9 +610,17 @@ setInterval(async () => {
   for (const s of Object.values(state.sessions)) {
     if (s.pid && !pidAlive(s.pid)) {
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
-      await clearStatus(s)
-      if (s.channel) await post(s.channel, '💤 *Session ended* — write here to resume it')
+      stopPoller(s)
       s.pid = null
+      try {
+        await clearStatus(s)
+        if (s.channel) await post(s.channel, '💤 *Session ended* — write here to resume it')
+      } catch (e) {
+        if (e?.data?.error === 'is_archived') {
+          delete state.channels[s.channel]; delete state.sessions[s.id]
+          log('sweep: dropped session with archived channel', s.id.slice(0, 8))
+        } else log('sweep post error:', e?.data?.error || String(e))
+      }
       saveState(state)
     }
   }
