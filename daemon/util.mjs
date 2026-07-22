@@ -148,16 +148,11 @@ export async function tmuxCapture(tname) {
   try { return (await execFile('tmux', ['capture-pane', '-t', tname, '-p'])).stdout } catch { return '' }
 }
 
-// True if a terminal is attached to the tmux session (i.e. a visible window exists).
-export async function tmuxHasClient(tname) {
-  try { return (await execFile('tmux', ['list-clients', '-t', tname])).stdout.trim().length > 0 } catch { return false }
-}
-
-// Open a Ghostty window attached to an already-running tmux session (window was closed).
-export async function ghosttyAttach(tmuxName, title) {
-  const inner = `exec tmux attach-session -t ${shq(tmuxName)}`
-  await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title || tmuxName}`, '-e', 'zsh', '-lc', inner])
-  log('ghostty attach', tmuxName)
+// Make closing the terminal window terminate the session (and claude), instead of
+// leaving it running headless in a detached tmux. The hook fires on a real
+// client detach (window close), not on the daemon's send-keys/capture commands.
+export async function setKillOnClose(tname) {
+  try { await execFile('tmux', ['set-hook', '-t', tname, 'client-detached', `kill-session -t ${tname}`]) } catch {}
 }
 
 // Send Escape — Claude Code's interrupt key — to abort the running turn.
