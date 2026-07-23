@@ -4,6 +4,21 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] — 2026-07-23
+
+### Fixed
+- **`/cc-new` (and resume) could fail with Ghostty's "terminal failed to
+  initialize."** Each session opens its own Ghostty instance via
+  `open -na Ghostty.app`. With Ghostty's default `quit-after-last-window-closed=false`,
+  a terminated session left a *windowless* instance running, and enough of these
+  eventually starved a fresh spawn of a GPU surface — the new window failed to
+  initialize (and, having no surface, showed a neighboring window's title).
+  Spawned instances now quit when their window closes
+  (`--quit-after-last-window-closed=true`), and the daemon reaps any
+  dead-session Ghostty instances before each spawn.
+
+[0.2.3]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.3
+
 ## [0.2.2] — 2026-07-22
 
 ### Fixed

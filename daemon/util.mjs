@@ -176,10 +176,35 @@ export async function tmuxSendCommand(tname, slashCommand) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
 }
 
+// Reap CCS-spawned Ghostty instances whose tmux session has already ended. On
+// macOS, `open -na Ghostty.app` starts a new *instance* per session; once its
+// window closes the instance can linger with no windows (a "zombie"). Enough
+// zombies exhaust the GPU/window-server resources and the next spawn dies with
+// "terminal failed to initialize". New instances now quit themselves via
+// --quit-after-last-window-closed=true (see ghosttySpawn); this sweep is the
+// backstop and also cleans up instances started before that flag existed.
+export async function reapZombieGhosttys() {
+  let out = ''
+  try { out = (await execFile('ps', ['-axo', 'pid=,command='])).stdout } catch { return }
+  for (const line of out.split('\n')) {
+    if (!/Ghostty\.app\/Contents\/MacOS\/ghostty/.test(line)) continue
+    const pid = Number((line.match(/^\s*(\d+)\s/) || [])[1])
+    const tname = (line.match(/new-session -s '(ccs-[^']+)'/) || [])[1]
+    if (!pid || !tname || await tmuxAlive(tname)) continue
+    try { process.kill(pid); log('reaped zombie ghostty', { pid, tname }) } catch {}
+  }
+}
+
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
+  await reapZombieGhosttys() // free resources from dead sessions before launching
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
-  await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title}`, '-e', 'zsh', '-lc', inner])
+  // --quit-after-last-window-closed=true: each spawn is its own Ghostty instance,
+  // so make it exit when its window closes. Otherwise terminated sessions leave
+  // windowless instances piling up until a spawn can't get a GPU surface
+  // ("terminal failed to initialize").
+  await execFile('open', ['-na', 'Ghostty.app', '--args',
+    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when

@@ -1,6 +1,6 @@
 {
   "name": "claude-slack-proxy",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Drive local Claude Code sessions from Slack — a private channel per session, bidirectional.",
   "private": true,
   "type": "module",
