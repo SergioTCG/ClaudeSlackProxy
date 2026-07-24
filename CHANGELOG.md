@@ -4,6 +4,70 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.8] — 2026-07-24
+
+One batch release for today's run of features and fixes (staged internally as
+0.2.5–0.2.8; only `v0.2.8` is tagged).
+
+### Added
+- **`/cc-update`** — update Claude Code and restart the current session with its
+  original launch flags, resuming the same conversation. It stops the session,
+  runs `claude update`, then relaunches through the resume path — so a session
+  picks up a new CLI build (and newly released models) without losing context.
+  Needs the app manifest reinstalled to register the new slash command.
+- **`/cc-model` lists available models with real versions.** With no argument it
+  now shows each alias, its display name, and its full model id (e.g. `opus` →
+  Opus 5 → `claude-opus-5`), enumerated from the installed `claude` binary so the
+  list stays correct across updates — nothing hardcoded.
+
+### Fixed
+- **`/cc-effort` and `/cc-model` now answer Claude Code's confirmation prompt.**
+  Changing effort or model invalidates the prompt cache, so Claude Code asks
+  "Change effort level? Yes / No" — which the daemon left hanging. The first
+  `/cc-effort max` therefore did nothing (the channel topic stayed `low`), and only
+  a second call — whose stray Enter confirmed the first dialog — took effect. The
+  daemon now detects the dialog and confirms the highlighted "Yes," so a single
+  call applies.
+- **Effort is preserved across a resume.** `/effort` is per-session in Claude Code
+  and resets to the default (low) on `--resume`. The daemon now remembers a
+  session's effort (from the statusline / `/cc-effort`) and re-applies it as an
+  `--effort` launch flag when resuming, so a restarted session keeps its effort.
+- **A session whose working directory drifted into a subfolder can resume again.**
+  `--resume` is scoped to the launch dir's project slug, but the daemon's recorded
+  cwd follows the statusline — so if claude `cd`'d into a subdirectory mid-session,
+  resuming looked for the transcript under the wrong slug, found nothing, and the
+  session died instantly on every wake (`Waking up…` → `Session ended`). The daemon
+  now re-anchors a resume to the directory that actually holds the transcript.
+- **Resurrecting or spawning a session no longer kills every other session — and
+  closing a terminal still ends its session.** Ghostty 1.3.1 runs single-instance
+  on macOS: opening any window (every resurrect / `/cc-new` / `/cc-update`) briefly
+  detaches every *other* window's tmux client for a fraction of a second before it
+  re-attaches. The 0.2.1 `client-detached → kill-session` hook fired on that
+  instantaneous blip — killing a session, whose window then closed and blipped the
+  rest — a chain reaction that wiped out all live sessions on any spawn. The tmux
+  hook is gone; instead the daemon watches client attachment and ends a session
+  only after its window has stayed gone for a grace period (8s), well past any
+  transient blip. So genuinely closing a terminal still terminates the session
+  (write to resume), while a spawn leaves every other window untouched. Also
+  reverted the 0.2.3 `--quit-after-last-window-closed` flag and the Ghostty process
+  reaper, which assumed the old multi-instance model. The daemon strips the old
+  hook from already-running sessions on boot.
+- **A finished turn's response can no longer be silently lost.** Response
+  mirroring relied solely on the Stop hook; if that hook was missed — across a
+  daemon restart mid-turn, or on a very long auto-compacted turn — the final
+  response landed in the terminal but never in Slack. The live-status poller now
+  detects turn-end (the spinner disappearing) and finalizes as a fallback,
+  mirroring the response and clearing status. It is idempotent with the Stop hook
+  (the read offset guards against a double post).
+- **A stranded transcript read-offset now self-heals on restart.** The offset is
+  persisted with a debounced write that a hard restart (`kickstart -k` sends
+  SIGKILL) could drop, leaving mirroring stuck behind and silently mirroring
+  nothing. On boot, idle live sessions re-anchor their offset to the transcript's
+  end; sessions mid-turn keep their offset and resume the poller (which will
+  finalize them via the fallback above).
+
+[0.2.8]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.8
+
 ## [0.2.4] — 2026-07-24
 
 ### Added

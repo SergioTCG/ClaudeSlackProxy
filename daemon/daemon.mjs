@@ -9,7 +9,7 @@ import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
-  ghosttySpawn, setKillOnClose,
+  ghosttySpawn, clearKillOnClose, execFile, availableModels,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -45,6 +45,25 @@ function consumeInjected(sid, prompt) {
 }
 const ALLOWED_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort'])
 const FLAG_ALIAS = { '--dsp': '--dangerously-skip-permissions' }
+
+// ---- Claude Code binary: version, update, model list ------------------------
+const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
+function claudeBin() {
+  const local = path.join(process.env.HOME, '.local', 'bin', 'claude') // native-install symlink
+  return fs.existsSync(local) ? local : 'claude'
+}
+async function claudeVersion() {
+  try { return (await execFile(claudeBin(), ['--version'])).stdout.trim().split(/\s+/)[0] } catch { return '?' }
+}
+let modelCache = { key: null, list: [] }
+async function getModels() {
+  const bin = claudeBin()
+  let key = bin; try { key = fs.realpathSync(bin) } catch {}
+  if (modelCache.key === key) return modelCache.list
+  const list = await availableModels(bin)
+  if (list.length) modelCache = { key, list } // keyed by version path; refreshes after an update
+  return list
+}
 const PERM_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 // ---- session/channel helpers -----------------------------------------------
@@ -175,18 +194,41 @@ function extractSpinner(pane) {
 }
 function startPoller(session) {
   if (pollers.has(session.id)) return
-  const p = { timer: null, last: '', stopped: false }
+  const p = { timer: null, last: '', stopped: false, sawSpinner: false, idle: 0 }
   p.timer = setInterval(async () => {
     if (p.stopped || !session.tmux || !(session.pid && pidAlive(session.pid))) return
     const line = extractSpinner(await tmuxCapture(session.tmux))
     if (p.stopped) return // Stop fired during the capture — don't re-post
-    if (line && line !== p.last) { p.last = line; await setStatus(session, line) }
+    if (line) {
+      p.sawSpinner = true; p.idle = 0
+      if (line !== p.last) { p.last = line; await setStatus(session, line) }
+    } else if (p.sawSpinner && !hasPendingPerm(session) && ++p.idle >= 4) {
+      // The spinner vanished for ~12s after a turn was running: the turn ended.
+      // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
+      // long/compacted turn), do it here so the response is never silently lost.
+      p.stopped = true
+      log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
+      await finalizeTurn(session)
+    }
   }, 3000)
   pollers.set(session.id, p)
 }
 function stopPoller(session) {
   const p = pollers.get(session.id)
   if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
+}
+const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel === session.channel)
+// Mirror a turn's final assistant text and clear its live status. Called by the
+// Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
+// Idempotent: readNewAssistantText advances the read offset, so a second caller
+// (whichever of Stop / poller runs later) reads nothing and posts nothing.
+async function finalizeTurn(session) {
+  stopPoller(session)
+  await clearStatus(session)
+  if (session.transcript) await waitTranscriptSettle(session.transcript)
+  const text = readNewAssistantText(session)
+  if (text) await postMd(session.channel, text)
+  saveState(state)
 }
 
 // Recover live status after a daemon restart. The poller and each status
@@ -211,11 +253,15 @@ async function readoptStatus() {
       if (ts) statusTs.set(s.id, ts) // resume editing the existing (frozen) message
       startPoller(s)
       log('re-adopted live turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
-    } else if (ts) {
-      try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
-      log('cleared stale status', s.id.slice(0, 8))
+    } else {
+      // Idle: nothing to mirror. Re-anchor the read offset to EOF so a stale or
+      // lost offset from before the restart doesn't strand mirroring behind, and
+      // clear any status left frozen by the restart.
+      try { const sz = fs.statSync(s.transcript).size; if (Number.isFinite(sz) && sz !== s.offset) { s.offset = sz; log('re-anchored idle session', s.id.slice(0, 8), 'offset→EOF') } } catch {}
+      if (ts) { try { await web.chat.delete({ channel: s.channel, ts }) } catch {} }
     }
   }
+  saveState(state)
 }
 
 // System-injected prompts (task notifications, reminders, local-command echoes)
@@ -298,7 +344,8 @@ async function onHook(body, ppid, tmux, flags) {
   saveState(state)
 
   if (ev === 'SessionStart') {
-    if (session.tmux) setKillOnClose(session.tmux) // closing the window terminates claude
+    restarting.delete(sid) // a resumed /cc-update session is up; re-enable the "ended" notice
+    if (session.tmux) clearKillOnClose(session.tmux) // window close must NOT kill the session (Ghostty single-instance cascade)
     const ch = await ensureChannel(session)
     const src = body.source
     if (src === 'resume') await post(ch, '▶️ *Resumed*')
@@ -338,18 +385,14 @@ async function onHook(body, ppid, tmux, flags) {
     return
   }
   if (ev === 'Stop') {
-    stopPoller(session)
-    await clearStatus(session)
-    if (session.transcript) await waitTranscriptSettle(session.transcript)
-    const text = readNewAssistantText(session)
-    if (text) await postMd(session.channel, text)
-    saveState(state)
+    log('stop hook', session.id.slice(0, 8))
+    await finalizeTurn(session)
     return
   }
   if (ev === 'SessionEnd') {
     stopPoller(session)
     await clearStatus(session)
-    if (session.channel) await post(session.channel, '💤 *Session ended* — write here to resume it')
+    if (session.channel && !restarting.has(sid)) await post(session.channel, '💤 *Session ended* — write here to resume it')
     session.pid = null
     saveState(state)
     return
@@ -413,13 +456,51 @@ function resumeArgs(session) {
     const t = toks[i]
     if (t === '--resume' || t === '-r') { i++; continue } // drop --resume <id>
     if (t === '--continue' || t === '-c') continue
+    if (t === '--effort') { i++; continue } // drop; re-added below from the live value
     keep.push(t)
   }
   if (!keep.length) keep.push(...(process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions').split(/\s+/).filter(Boolean))
+  // Claude Code resets runtime effort (set via /effort) on resume, so carry the
+  // last-known effort forward as a launch flag (--effort is a valid launch flag).
+  const effort = session.effort || sessionMeta.get(session.id)?.effort
+  if (effort) keep.push('--effort', effort)
   return [...keep, '--resume', session.id]
 }
 
+// /model and /effort now pop a "Change …? Yes / No" confirmation (changing either
+// invalidates the prompt cache). Send the command, then confirm the highlighted
+// default ("Yes") when the dialog appears; if it never appears, this is a no-op.
+async function sendMenuCommand(tmux, cmd) {
+  await tmuxSendCommand(tmux, cmd)
+  for (let i = 0; i < 5; i++) {
+    await sleep(400)
+    if (/Yes, switch to|Change (effort|model) level/i.test(await tmuxCapture(tmux))) {
+      await execFile('tmux', ['send-keys', '-t', tmux, 'Enter']) // confirm "Yes"
+      return
+    }
+  }
+}
+
+// --resume is scoped to the launch dir's project slug (~/.claude/projects/<slug>/),
+// so we must launch from the directory whose slug holds this session's transcript.
+// The recorded cwd can drift — claude cd's into a subdir and the statusline moves
+// session.cwd there — which makes --resume look under the wrong slug and fail. Find
+// the dir that actually holds the transcript and re-anchor to it.
+function resumeCwd(session) {
+  if (session.transcript && fs.existsSync(session.transcript)) return session.cwd
+  const base = path.join(process.env.HOME, '.claude', 'projects')
+  try {
+    for (const d of fs.readdirSync(base)) {
+      const t = path.join(base, d, session.id + '.jsonl')
+      if (fs.existsSync(t)) { session.transcript = t; return '/' + d.replace(/^-/, '').replace(/-/g, '/') }
+    }
+  } catch {}
+  return session.cwd
+}
+
 async function resurrect(session, text) {
+  const anchored = resumeCwd(session)
+  if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
   // Claude Code scopes --resume to the cwd's project, so the folder must exist at
   // its original path. If it's gone (e.g. a deleted worktree), recreate it empty —
   // the transcript in ~/.claude/projects survives, so the conversation resumes.
@@ -447,6 +528,31 @@ async function resurrect(session, text) {
   // SessionStart flushes it into the fresh terminal once the session is up
 }
 const pendingBySid = new Map()
+
+// /cc-update: stop this session's Claude, update the CLI if a newer build exists,
+// then resume the same conversation with identical launch flags.
+async function updateAndRestart(session) {
+  const before = await claudeVersion()
+  await post(session.channel, `🔄 *Restarting ${path.basename(session.cwd)}* — stopping Claude, checking for updates, then resuming with the same flags.`)
+  restarting.add(session.id)
+  if (session.tmux) await tmuxKill(session.tmux)
+  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  stopPoller(session); await clearStatus(session)
+  session.pid = null; saveState(state)
+  await sleep(1500) // let the old process fully exit before the binary is swapped
+  let note = ''
+  try {
+    const { stdout, stderr } = await execFile(claudeBin(), ['update'], { timeout: 180000 })
+    note = (stdout + '\n' + stderr).split('\n').map(s => s.trim()).filter(Boolean).pop() || ''
+  } catch (e) { note = `error: ${e?.stderr?.trim() || e?.message || e}` }
+  const after = await claudeVersion()
+  const ver = before !== after ? `updated \`${before}\` → \`${after}\``
+    : /error|fail/i.test(note) ? `⚠️ update check failed — staying on \`${after}\` (${note.slice(0, 120)})`
+    : `already on the latest (\`${after}\`)`
+  await post(session.channel, `📦 Claude Code ${ver}. Resuming the conversation…`)
+  await resurrect(session)
+  setTimeout(() => restarting.delete(session.id), 60000) // safety net if the resume never starts
+}
 
 async function handleSlackMessage(channel, text, sender) {
   const trimmed = text.trim()
@@ -638,7 +744,8 @@ async function dispatch(name, rest, channel) {
     return post(channel,
       '*Commands* — use `/cc-<name>` (autocompletes as you type `/cc-`)\n' +
       '`/cc-new [folder] [--dsp] [--chrome]` — start a session (no arg = pick a project)\n' +
-      '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg = show current)\n' +
+      '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg lists available models with versions)\n' +
+      '`/cc-update` — update Claude Code & restart this session with the same flags\n' +
       '`/cc-stop` — interrupt the running turn\n' +
       '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
       '`/cc-health` — bridge status\n' +
@@ -713,20 +820,34 @@ async function dispatch(name, rest, channel) {
     if (!session) return post(channel, `Use \`/cc-${name}\` in a session channel.`)
     const meta = sessionMeta.get(session.id) || {}
     if (!rest.length) {
-      const cur = name === 'model' ? (meta.model || readModel(session) || 'unknown') : (meta.effort || 'unknown')
-      const opts = name === 'model' ? 'sonnet · opus · haiku · fable' : 'low · medium · high · max'
-      return post(channel, `*${name}*: \`${cur}\`\nSet with \`/cc-${name} <value>\`  (${opts})`)
+      if (name === 'model') {
+        const cur = meta.model || readModel(session) || 'unknown'
+        const models = await getModels()
+        if (models.length) {
+          const rows = models.map(m => `| \`${m.alias}\` | ${m.name} | \`${m.id}\` |`).join('\n')
+          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`/cc-model <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}`)
+        }
+        return post(channel, `*model*: \`${cur}\`\nSet with \`/cc-model <value>\`  (sonnet · opus · haiku · fable)`)
+      }
+      return post(channel, `*effort*: \`${meta.effort || 'unknown'}\`\nSet with \`/cc-effort <value>\`  (low · medium · high · max)`)
     }
     if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
-    await tmuxSendCommand(session.tmux, `/${name} ${rest.join(' ')}`)
-    sessionMeta.set(session.id, { ...meta, [name]: rest.join(' ') })
-    return post(channel, `✅ ${name} → \`${rest.join(' ')}\``)
+    const val = rest.join(' ')
+    await sendMenuCommand(session.tmux, `/${name} ${val}`)
+    sessionMeta.set(session.id, { ...meta, [name]: val })
+    if (name === 'effort') { session.effort = val; saveState(state) } // persist so resume restores it
+    return post(channel, `✅ ${name} → \`${val}\``)
   }
   if (name === 'stop') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
     await tmuxInterrupt(session.tmux)
     return post(channel, '⎋ *Interrupted* the running turn.')
+  }
+  if (name === 'update' || name === 'restart') {
+    const session = sessionByChannel(channel)
+    if (!session) return post(channel, 'Use `/cc-update` in a session channel — it updates Claude Code and restarts the session with the same flags.')
+    return updateAndRestart(session)
   }
   if (name === 'new') {
     if (!rest.length) return postFolderPicker(channel)
@@ -765,6 +886,7 @@ http.createServer(async (req, res) => {
         const session = state.sessions[j.session_id]
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
+          if (j.effort?.level && session.effort !== j.effort.level) { session.effort = j.effort.level; saveState(state) } // persist for resume
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())
@@ -906,13 +1028,44 @@ setInterval(async () => {
   }
 }, 30000)
 
+// ---- terminal-close → terminate, debounced ----------------------------------
+// Restores 0.2.1's "close the window to end the session" — but safely. A
+// single-instance Ghostty spawn briefly detaches every other window's tmux client
+// (they re-attach in <1s); reacting to that instantaneous detach is what cascaded
+// into killing everything. So instead of a tmux client-detached hook, the daemon
+// watches client attachment and ends a session only once its window has stayed
+// gone for CLOSE_GRACE_MS — well past any transient spawn blip.
+const CLOSE_GRACE_MS = 8000
+const winGoneSince = new Map() // sid → ts its window went missing
+const winSawWindow = new Set() // sids we've seen with a live window at least once
+setInterval(async () => {
+  for (const s of Object.values(state.sessions)) {
+    if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) { winGoneSince.delete(s.id); winSawWindow.delete(s.id); continue }
+    let n = -1
+    try { n = (await execFile('tmux', ['list-clients', '-t', s.tmux])).stdout.split('\n').filter(Boolean).length } catch {}
+    if (n < 0) continue                       // tmux hiccup — don't act on unknown state
+    if (n > 0) { winSawWindow.add(s.id); winGoneSince.delete(s.id); continue }
+    if (!winSawWindow.has(s.id)) continue     // still opening its first window
+    if (!winGoneSince.has(s.id)) { winGoneSince.set(s.id, Date.now()); continue }
+    if (Date.now() - winGoneSince.get(s.id) < CLOSE_GRACE_MS) continue // maybe a spawn blip; wait it out
+    log('terminal closed → ending session', s.id.slice(0, 8))
+    winGoneSince.delete(s.id); winSawWindow.delete(s.id)
+    if (s.tmux) await tmuxKill(s.tmux)
+    if (s.pid && pidAlive(s.pid)) { try { process.kill(s.pid) } catch {} }
+    stopPoller(s); await clearStatus(s)
+    s.pid = null; saveState(state)
+    if (s.channel && !restarting.has(s.id)) { try { await post(s.channel, '💤 *Session ended* (terminal closed) — write here to resume it') } catch {} }
+  }
+}, 3000)
+
 // ---- boot -------------------------------------------------------------------
 ;(async () => {
   const r = await web.auth.test()
   log('slack auth ok:', r.team, 'bot', r.user)
-  // Ensure existing live sessions also terminate on window close.
+  // Remove any old client-detached → kill-session hooks from existing live sessions,
+  // so a Ghostty single-instance window teardown can no longer cascade-kill them.
   for (const s of Object.values(state.sessions)) {
-    if (s.tmux && s.pid && pidAlive(s.pid)) setKillOnClose(s.tmux)
+    if (s.tmux && s.pid && pidAlive(s.pid)) clearKillOnClose(s.tmux)
   }
   if (!state.control) {
     try {

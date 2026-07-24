@@ -148,11 +148,15 @@ export async function tmuxCapture(tname) {
   try { return (await execFile('tmux', ['capture-pane', '-t', tname, '-p'])).stdout } catch { return '' }
 }
 
-// Make closing the terminal window terminate the session (and claude), instead of
-// leaving it running headless in a detached tmux. The hook fires on a real
-// client detach (window close), not on the daemon's send-keys/capture commands.
-export async function setKillOnClose(tname) {
-  try { await execFile('tmux', ['set-hook', '-t', tname, 'client-detached', `kill-session -t ${tname}`]) } catch {}
+// Ensure a session does NOT die when its terminal window closes. We used to set a
+// client-detached → kill-session hook (so closing the window ended claude), but
+// Ghostty 1.3.1 runs single-instance: any `open -na` spawn re-initializes the one
+// shared instance and closes *every* window at once, which made that hook cascade
+// into killing all live sessions. So we now actively remove the hook — a closed
+// window just leaves claude running headless in tmux (the daemon still drives it,
+// and Slack still works). Intentional termination is `/cc-kill`.
+export async function clearKillOnClose(tname) {
+  try { await execFile('tmux', ['set-hook', '-u', '-t', tname, 'client-detached']) } catch {}
 }
 
 // Send Escape — Claude Code's interrupt key — to abort the running turn.
@@ -176,35 +180,16 @@ export async function tmuxSendCommand(tname, slashCommand) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
 }
 
-// Reap CCS-spawned Ghostty instances whose tmux session has already ended. On
-// macOS, `open -na Ghostty.app` starts a new *instance* per session; once its
-// window closes the instance can linger with no windows (a "zombie"). Enough
-// zombies exhaust the GPU/window-server resources and the next spawn dies with
-// "terminal failed to initialize". New instances now quit themselves via
-// --quit-after-last-window-closed=true (see ghosttySpawn); this sweep is the
-// backstop and also cleans up instances started before that flag existed.
-export async function reapZombieGhosttys() {
-  let out = ''
-  try { out = (await execFile('ps', ['-axo', 'pid=,command='])).stdout } catch { return }
-  for (const line of out.split('\n')) {
-    if (!/Ghostty\.app\/Contents\/MacOS\/ghostty/.test(line)) continue
-    const pid = Number((line.match(/^\s*(\d+)\s/) || [])[1])
-    const tname = (line.match(/new-session -s '(ccs-[^']+)'/) || [])[1]
-    if (!pid || !tname || await tmuxAlive(tname)) continue
-    try { process.kill(pid); log('reaped zombie ghostty', { pid, tname }) } catch {}
-  }
-}
-
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
-  await reapZombieGhosttys() // free resources from dead sessions before launching
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
-  // --quit-after-last-window-closed=true: each spawn is its own Ghostty instance,
-  // so make it exit when its window closes. Otherwise terminated sessions leave
-  // windowless instances piling up until a spawn can't get a GPU surface
-  // ("terminal failed to initialize").
-  await execFile('open', ['-na', 'Ghostty.app', '--args',
-    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner])
+  // NB: Ghostty 1.3.1 is single-instance, so this `open -na` re-initializes the one
+  // shared instance and can close other windows. That no longer kills those sessions
+  // (we don't set kill-on-close anymore — see clearKillOnClose), so they survive
+  // headless. We intentionally do NOT pass --quit-after-last-window-closed here (it
+  // would quit the shared instance) and no longer reap Ghostty processes (killing the
+  // shared process would nuke every window) — both assumed the old multi-instance model.
+  await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when
@@ -214,4 +199,31 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) 
     })
     child.unref()
   }
+}
+
+// Enumerate the model families this `claude` build supports, each mapped to its
+// latest version. The native install is a single executable with the model ids
+// embedded, so we read them straight from the binary — the list stays correct
+// across `claude update` with nothing hardcoded.
+export async function availableModels(bin) {
+  const families = ['opus', 'sonnet', 'haiku', 'fable']
+  let out = ''
+  try {
+    out = (await execFile('grep', ['-aoE', `claude-(${families.join('|')})-[0-9][a-z0-9-]*`, bin],
+      { maxBuffer: 8 << 20, timeout: 8000 })).stdout
+  } catch { return [] } // grep exits non-zero on no match / unreadable binary → caller falls back
+  const ids = [...new Set(out.split('\n').filter(Boolean))]
+  const models = []
+  for (const fam of families) {
+    const pre = `claude-${fam}-`
+    const clean = ids
+      .filter(id => new RegExp(`^${pre}\\d+(?:-\\d+)*$`).test(id))      // plain versions only
+      .filter(id => !id.slice(pre.length).split('-').some(s => s.length >= 6)) // drop dated snapshots
+    if (!clean.length) continue
+    const nums = id => id.slice(pre.length).split('-').map(Number)
+    clean.sort((a, b) => { const A = nums(a), B = nums(b); for (let i = 0; i < Math.max(A.length, B.length); i++) { const d = (A[i] || 0) - (B[i] || 0); if (d) return d } return 0 })
+    const id = clean[clean.length - 1]
+    models.push({ alias: fam, id, name: `${fam[0].toUpperCase()}${fam.slice(1)} ${id.slice(pre.length).replace(/-/g, '.')}` })
+  }
+  return models
 }
