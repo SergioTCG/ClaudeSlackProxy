@@ -4,6 +4,30 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] — 2026-07-24
+
+### Added
+- **Collaborators — invite teammates into a session.** A per-channel whitelist
+  lets you allow specific Slack users to send prompts to the session behind that
+  channel. Manage it from `/cc-status` in a session channel: a user-picker adds a
+  collaborator, a Remove button revokes them, and the current list is shown. A
+  collaborator's prompt is injected labelled `[Slack collaborator <name>]`, so
+  the transcript records who said what. Collaborators can send prompts only — not
+  permission verdicts, `/cc-*` commands, or session resurrection — and only into a
+  live session; all owner-only actions stay owner-only. The whitelist persists
+  across daemon restarts. No Slack app changes required (uses the existing
+  `users:read` scope and interactive components).
+
+### Fixed
+- **Live status survives a daemon restart.** The status poller and each status
+  message's reference lived only in memory, so restarting the daemon mid-turn
+  froze that turn's Slack status — it could no longer be updated, nor cleared
+  when the turn ended. On boot the daemon now re-adopts any session still showing
+  a spinner (resuming the poller on the existing status message, in place) and
+  clears stale status for turns that ended while it was down.
+
+[0.2.4]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.4
+
 ## [0.2.3] — 2026-07-23
 
 ### Fixed

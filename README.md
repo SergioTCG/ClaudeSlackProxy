@@ -57,12 +57,14 @@ Commands are native Slack slash commands — type `/cc-` and Slack autocompletes
 | a file / image attachment | downloaded and handed to Claude as a local path to read |
 | `/cc-new [folder] [--dsp] [--chrome]` | start a session — no argument shows a project picker (dirs under `$HOME`) |
 | `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it |
-| `/cc-status` | session info here (folder, branch, git, model, effort), or all sessions from the control channel |
+| `/cc-status` | session info + manage collaborators here, or all sessions from the control channel |
 | `/cc-health` | bridge status |
 | `/cc-stop` | interrupt the running turn |
 | `/cc-kill [<id>]` | end a session (channel stays, resumable) |
 | `/cc-cleanup` | archive dormant channels (from the control channel) |
 | a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or `yes <id>` / `no <id>` |
+
+**Collaborators.** From `/cc-status` in a session channel, a user-picker lets you allow specific Slack teammates to send prompts to that session (a Remove button revokes them; the current list is shown). Their prompts are injected labelled `[Slack collaborator <name>]`, so the transcript records who said what. Collaborators can send prompts only — not permission verdicts, `/cc-*` commands, or session resurrection — and only while the session is live. Everything else stays owner-only, and the whitelist is per channel and survives restarts.
 
 While a turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into an edit-in-place status message, and the channel topic tracks `folder · branch · model · effort`. Responses over ~6,000 chars upload as a `response.md` file. Consent dialogs are auto-dismissed. Sessions never archive on their own — a dormant channel says "write here to resume," and doing so spawns a Ghostty window and continues where you left off.
 

@@ -19,6 +19,7 @@ const TEAM = process.env.SLACK_TEAM_ID
 const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
+if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
 const BOOT_TS = Date.now()
 
 // Safety net: a single Slack API error (e.g. posting to an archived channel from
@@ -54,6 +55,20 @@ function sessionByChannel(ch) {
   const sid = state.channels[ch]
   return sid ? state.sessions[sid] : null
 }
+// ---- collaborators: a per-channel whitelist of Slack users allowed to post ---
+const nameCache = new Map()
+async function resolveUserName(userId) {
+  if (nameCache.has(userId)) return nameCache.get(userId)
+  let name = userId
+  try {
+    const u = (await web.users.info({ user: userId })).user || {}
+    name = u.profile?.display_name || u.real_name || u.name || userId
+  } catch (e) { log('users.info failed', userId, e?.data?.error || String(e)) }
+  nameCache.set(userId, name)
+  return name
+}
+const collaborators = ch => state.whitelist[ch] || {}
+const whitelistedName = (ch, userId) => collaborators(ch)[userId] || null
 function post(channel, text) {
   return enqueue(channel, () => web.chat.postMessage({ channel, text, unfurl_links: false }))
 }
@@ -172,6 +187,35 @@ function startPoller(session) {
 function stopPoller(session) {
   const p = pollers.get(session.id)
   if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
+}
+
+// Recover live status after a daemon restart. The poller and each status
+// message's ts live only in memory, so a restart mid-turn freezes the status —
+// the daemon can neither update it nor, on Stop, clear it. On boot we re-adopt:
+// if a live session still shows a spinner, find its frozen status message and
+// resume the poller on it; if the turn already ended, delete the stale message.
+async function findStatusMessage(channel) {
+  if (!channel) return null
+  try {
+    const r = await web.conversations.history({ channel, limit: 15 })
+    // Slack returns the emoji as its :gear: shortcode in `text`, not the literal ⚙️.
+    return r.messages?.find(m => typeof m.text === 'string' && /^(:gear:|⚙️)/.test(m.text))?.ts || null
+  } catch (e) { log('findStatusMessage error', e?.data?.error || String(e)); return null }
+}
+async function readoptStatus() {
+  for (const s of Object.values(state.sessions)) {
+    if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
+    const spinning = !!extractSpinner(await tmuxCapture(s.tmux))
+    const ts = await findStatusMessage(s.channel)
+    if (spinning) {
+      if (ts) statusTs.set(s.id, ts) // resume editing the existing (frozen) message
+      startPoller(s)
+      log('re-adopted live turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+    } else if (ts) {
+      try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
+      log('cleared stale status', s.id.slice(0, 8))
+    }
+  }
 }
 
 // System-injected prompts (task notifications, reminders, local-command echoes)
@@ -404,8 +448,20 @@ async function resurrect(session, text) {
 }
 const pendingBySid = new Map()
 
-async function handleSlackMessage(channel, text) {
+async function handleSlackMessage(channel, text, sender) {
   const trimmed = text.trim()
+
+  // Collaborators may only send prompts into a LIVE session: no permission
+  // verdicts, no commands, and no resurrection (that would spawn a terminal on
+  // the host). The prompt is attributed so the transcript shows who sent it.
+  if (sender) {
+    const session = sessionByChannel(channel)
+    if (!session) { log('collab msg in unmapped channel, ignored', channel); return }
+    if (!(session.pid && pidAlive(session.pid))) {
+      return post(channel, `💤 Session is dormant — <@${sender.id}>’s message wasn’t delivered. Only the owner can resume it.`)
+    }
+    return injectText(session, `[Slack collaborator ${sender.name}]\n${trimmed}`)
+  }
 
   // permission verdict by text ("yes abcde" / "no abcde")
   const pm = PERM_REPLY_RE.exec(trimmed)
@@ -472,9 +528,12 @@ async function downloadSlackFile(url) {
 }
 
 // Download files shared in a channel and inject them as local paths Claude can read.
-async function handleAttachments(channel, caption, files) {
+async function handleAttachments(channel, caption, files, sender) {
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
+  if (sender && !(session.pid && pidAlive(session.pid))) {
+    return post(channel, `💤 Session is dormant — <@${sender.id}>’s attachment wasn’t delivered. Only the owner can resume it.`)
+  }
   const dir = path.join(process.env.HOME, '.claude', 'ccs-attachments')
   fs.mkdirSync(dir, { recursive: true })
   const saved = []
@@ -498,7 +557,7 @@ async function handleAttachments(channel, caption, files) {
   const body = caption?.trim()
     ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
     : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
-  await injectText(session, body)
+  await injectText(session, sender ? `[Slack collaborator ${sender.name}]\n${body}` : body)
 }
 
 const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
@@ -546,6 +605,33 @@ async function postFolderPicker(channel) {
   })
 }
 
+// Interactive collaborator panel: a user-picker to add + a Remove button per
+// current collaborator. Rendered under /cc-status in a session channel.
+async function collabBlocks(channel) {
+  const ids = Object.keys(collaborators(channel))
+  const blocks = [{
+    type: 'section',
+    text: { type: 'mrkdwn', text: '*👥 Collaborators* — Slack users allowed to send prompts to this session (their prompts are labelled in the transcript)' },
+    accessory: { type: 'users_select', action_id: 'collab_add', placeholder: { type: 'plain_text', text: 'Add a collaborator…' } },
+  }]
+  if (!ids.length) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_None yet — pick someone above to let them post here._' }] })
+  } else {
+    for (const uid of ids) {
+      blocks.push({
+        type: 'section', text: { type: 'mrkdwn', text: `• <@${uid}>` },
+        accessory: { type: 'button', text: { type: 'plain_text', text: 'Remove' }, style: 'danger', value: `collab_rm:${uid}`, action_id: 'collab_rm' },
+      })
+    }
+  }
+  return blocks
+}
+async function refreshCollabPanel(body) {
+  try {
+    await web.chat.update({ channel: body.channel.id, ts: body.message.ts, text: 'Collaborators', blocks: await collabBlocks(body.channel.id) })
+  } catch (e) { log('collab panel update failed', e?.data?.error || String(e)) }
+}
+
 // Command dispatch for the native /cc-* slash commands.
 async function dispatch(name, rest, channel) {
   if (name === 'help') {
@@ -554,7 +640,7 @@ async function dispatch(name, rest, channel) {
       '`/cc-new [folder] [--dsp] [--chrome]` — start a session (no arg = pick a project)\n' +
       '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg = show current)\n' +
       '`/cc-stop` — interrupt the running turn\n' +
-      '`/cc-status` — session info here, or all sessions from the control channel\n' +
+      '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
       '`/cc-health` — bridge status\n' +
       '`/cc-kill [here|<id>]` — end a session (channel stays, resumable)\n' +
       '`/cc-cleanup` — archive dormant channels')
@@ -568,7 +654,7 @@ async function dispatch(name, rest, channel) {
       const meta = sessionMeta.get(session.id) || {}
       const changes = gs ? `${gs.split('\n').length} file(s) changed` : '✓ clean'
       // Table cells are raw text (no markdown), so no backticks here.
-      return postMd(channel,
+      await postMd(channel,
         `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
         `| Field | Value |\n|---|---|\n` +
         `| Folder | ${session.cwd} |\n` +
@@ -577,6 +663,8 @@ async function dispatch(name, rest, channel) {
         `| Effort | ${meta.effort || '—'} |\n` +
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
+      await web.chat.postMessage({ channel, text: 'Collaborators', blocks: await collabBlocks(channel) })
+      return
     }
     const rows = Object.values(state.sessions).map(s => {
       const alive = s.pid && pidAlive(s.pid)
@@ -730,11 +818,15 @@ sm.on('message', async ({ event, ack }) => {
   if (!event || event.bot_id) return
   // allow normal messages and file shares; skip edits/joins/other subtypes
   if (event.subtype && event.subtype !== 'file_share') return
-  if (event.user !== USER) return // single trusted sender
+  // The owner is always trusted; a whitelisted collaborator may post prompts too.
+  const isOwner = event.user === USER
+  const name = isOwner ? null : whitelistedName(event.channel, event.user)
+  if (!isOwner && !name) return
+  const sender = isOwner ? null : { id: event.user, name }
   try {
     const text = unescapeSlack(event.text || '')
-    if (event.files?.length) await handleAttachments(event.channel, text, event.files)
-    else await handleSlackMessage(event.channel, text)
+    if (event.files?.length) await handleAttachments(event.channel, text, event.files, sender)
+    else await handleSlackMessage(event.channel, text, sender)
   } catch (e) { log('slack msg error', String(e)) }
 })
 
@@ -760,6 +852,30 @@ sm.on('interactive', async ({ body, ack }) => {
     if (action.action_id === 'ccnew_folder') {
       const folder = action.selected_option?.value
       if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), ['--dangerously-skip-permissions'])
+      return
+    }
+    if (action.action_id === 'collab_add') {
+      const uid = action.selected_user, channel = body.channel?.id
+      if (uid && channel && uid !== USER) {
+        const name = await resolveUserName(uid)
+        state.whitelist[channel] = { ...collaborators(channel), [uid]: name }
+        saveState(state)
+        log('collab add', uid, JSON.stringify(name), '→', channel)
+        await refreshCollabPanel(body)
+        await post(channel, `✅ <@${uid}> can now send prompts here — labelled *[Slack collaborator ${name}]* in the transcript.`)
+      }
+      return
+    }
+    if (action.action_id === 'collab_rm') {
+      const uid = String(action.value || '').split(':')[1], channel = body.channel?.id
+      if (uid && channel && collaborators(channel)[uid]) {
+        delete state.whitelist[channel][uid]
+        if (!Object.keys(state.whitelist[channel]).length) delete state.whitelist[channel]
+        saveState(state)
+        log('collab remove', uid, '→', channel)
+        await refreshCollabPanel(body)
+        await post(channel, `🚫 Removed <@${uid}> — they can no longer post here.`)
+      }
       return
     }
     if (action.value) {
@@ -814,4 +930,5 @@ setInterval(async () => {
   }
   await sm.start()
   log('socket mode connected — bridge ready')
+  await readoptStatus() // recover live status for turns that were mid-flight on restart
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })
