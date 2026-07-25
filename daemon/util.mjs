@@ -180,16 +180,44 @@ export async function tmuxSendCommand(tname, slashCommand) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Enter'])
 }
 
+// Reap windowless Ghostty zombies. Ghostty runs one process per window; an
+// instance whose window failed to initialize (or whose session ended before
+// --quit-after-last-window-closed existed) lingers with no window, and ~5+ live
+// instances make the NEXT window fail to initialize ("Oh, no" wedge). Only
+// instances whose tmux is dead AND that are older than minAgeSec are killed —
+// the age gate makes the fatal 0.2.8-era init-race (reaping a spawn still
+// materializing) impossible: a real zombie is minutes old, a starting one is
+// seconds old.
+export async function reapGhosttyZombies(minAgeSec = 60) {
+  let out = ''
+  try { out = (await execFile('ps', ['-axo', 'pid=,etime=,command='])).stdout } catch { return 0 }
+  let reaped = 0
+  for (const line of out.split('\n')) {
+    if (!/Ghostty\.app\/Contents\/MacOS\/ghostty/.test(line)) continue
+    const m = line.match(/^\s*(\d+)\s+([\d:.-]+)\s/)
+    const tname = (line.match(/new-session -s '(ccs-[^']+)'/) || [])[1]
+    if (!m || !tname) continue
+    // etime: [[dd-]hh:]mm:ss
+    const p = m[2].split('-'); const days = p.length > 1 ? Number(p[0]) : 0
+    const hms = p[p.length - 1].split(':').map(Number)
+    while (hms.length < 3) hms.unshift(0)
+    const age = days * 86400 + hms[0] * 3600 + hms[1] * 60 + hms[2]
+    if (age < minAgeSec || await tmuxAlive(tname)) continue
+    try { process.kill(Number(m[1])); reaped++; log('reaped windowless ghostty', { pid: Number(m[1]), tname, age }) } catch {}
+  }
+  return reaped
+}
+
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
-  // NB: Ghostty 1.3.1 is single-instance, so this `open -na` re-initializes the one
-  // shared instance and can close other windows. That no longer kills those sessions
-  // (we don't set kill-on-close anymore — see clearKillOnClose), so they survive
-  // headless. We intentionally do NOT pass --quit-after-last-window-closed here (it
-  // would quit the shared instance) and no longer reap Ghostty processes (killing the
-  // shared process would nuke every window) — both assumed the old multi-instance model.
-  await execFile('open', ['-na', 'Ghostty.app', '--args', `--title=${title}`, '-e', 'zsh', '-lc', inner])
+  // One Ghostty process per window. --quit-after-last-window-closed makes the
+  // instance exit when its window closes, so ended sessions don't pile up as
+  // windowless instances (enough of those and new windows fail to initialize).
+  // Safe now that closing a window no longer kills sessions via tmux hooks —
+  // the flag only ever quits the instance it launches.
+  await execFile('open', ['-na', 'Ghostty.app', '--args',
+    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when

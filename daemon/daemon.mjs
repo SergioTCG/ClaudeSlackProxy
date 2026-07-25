@@ -9,7 +9,7 @@ import {
   BRIDGE, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
-  ghosttySpawn, clearKillOnClose, execFile, availableModels,
+  ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -345,6 +345,7 @@ async function onHook(body, ppid, tmux, flags) {
 
   if (ev === 'SessionStart') {
     restarting.delete(sid) // a resumed /cc-update session is up; re-enable the "ended" notice
+    resurrectInFlight.delete(sid) // the wake completed; future resurrects are legitimate
     if (session.tmux) clearKillOnClose(session.tmux) // window close must NOT kill the session (Ghostty single-instance cascade)
     const ch = await ensureChannel(session)
     const src = body.source
@@ -498,34 +499,59 @@ function resumeCwd(session) {
   return session.cwd
 }
 
+// sid → ts of a resurrect currently materializing. Guards against stacked spawns:
+// messages that arrive while claude is still starting used to trigger fresh spawns
+// (and fresh "Waking…" posts) every time. Cleared by SessionStart, or after 90s.
+const resurrectInFlight = new Map()
+
 async function resurrect(session, text) {
-  const anchored = resumeCwd(session)
-  if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
-  // Claude Code scopes --resume to the cwd's project, so the folder must exist at
-  // its original path. If it's gone (e.g. a deleted worktree), recreate it empty —
-  // the transcript in ~/.claude/projects survives, so the conversation resumes.
-  if (!fs.existsSync(session.cwd)) {
-    try {
-      fs.mkdirSync(session.cwd, { recursive: true })
-      await post(session.channel, `⚠️ Folder \`${session.cwd}\` was gone — recreated it empty and resuming there. The conversation is intact; files from the original folder are not.`)
-    } catch (e) {
-      return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`claude --resume ${session.id}\` from a valid directory.`)
+  const inflight = resurrectInFlight.get(session.id)
+  if (inflight && Date.now() - inflight < 90000) return // already waking; message is queued
+  resurrectInFlight.set(session.id, Date.now())
+  let up = false
+  try {
+    const anchored = resumeCwd(session)
+    if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
+    // Claude Code scopes --resume to the cwd's project, so the folder must exist at
+    // its original path. If it's gone (e.g. a deleted worktree), recreate it empty —
+    // the transcript in ~/.claude/projects survives, so the conversation resumes.
+    if (!fs.existsSync(session.cwd)) {
+      try {
+        fs.mkdirSync(session.cwd, { recursive: true })
+        await post(session.channel, `⚠️ Folder \`${session.cwd}\` was gone — recreated it empty and resuming there. The conversation is intact; files from the original folder are not.`)
+      } catch (e) {
+        return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`claude --resume ${session.id}\` from a valid directory.`)
+      }
     }
+    await post(session.channel, '⏳ *Waking this session up on the Mac…*')
+    const args = resumeArgs(session)
+    // Spawn and VERIFY the terminal actually materialized (tmux session appears).
+    // A wedged Ghostty fails silently — the window never initializes and nothing
+    // reports it. On failure: kill the dead attempt, reap aged windowless
+    // instances (the usual cause), and retry once before telling the user.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await reapGhosttyZombies()
+      const tmuxName = `ccs-res-${Date.now().toString(36)}`
+      session.tmux = tmuxName
+      saveState(state)
+      await ghosttySpawn({
+        cwd: session.cwd,
+        args,
+        title: `ccs ${path.basename(session.cwd)} (resumed)`,
+        tmuxName,
+        autoConsent: true,
+      })
+      for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+      if (up) return // SessionStart clears the in-flight guard and flushes the queue
+      log('spawn did not materialize', { attempt, tmuxName })
+      await execFile('pkill', ['-f', tmuxName]).catch(() => {}) // kill the failed young instance
+    }
+    await post(session.channel,
+      '⚠️ *The terminal window never initialized* (Ghostty looks wedged) — I cleaned up and retried without luck. ' +
+      'Quit Ghostty on the Mac (or wait a minute) and write here again; your message is queued.')
+  } finally {
+    if (!up) resurrectInFlight.delete(session.id)
   }
-  await post(session.channel, '⏳ *Waking this session up on the Mac…*')
-  const args = resumeArgs(session)
-  const tmuxName = `ccs-res-${Date.now().toString(36)}`
-  session.tmux = tmuxName
-  saveState(state)
-  await ghosttySpawn({
-    cwd: session.cwd,
-    args,
-    title: `ccs ${path.basename(session.cwd)} (resumed)`,
-    tmuxName,
-    autoConsent: true,
-  })
-  // the caller has already queued the message in pendingBySid;
-  // SessionStart flushes it into the fresh terminal once the session is up
 }
 const pendingBySid = new Map()
 
@@ -692,7 +718,11 @@ async function spawnNew(channel, dir, extraFlags) {
   }
   const tmuxName = `ccs-new-${Date.now().toString(36)}`
   await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`…`)
+  await reapGhosttyZombies() // windowless-instance pileup breaks new windows
   await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
+  let up = false
+  for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+  if (!up) await post(channel, '⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try `/cc-new` again.')
 }
 
 const codeDir = () => process.env.CCS_CODE_DIR || path.join(process.env.HOME, 'Code')

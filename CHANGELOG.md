@@ -4,6 +4,28 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.9] — 2026-07-25
+
+### Fixed
+- **Resurrects and `/cc-new` can no longer wedge silently when Ghostty is in a
+  bad state.** Correcting 0.2.8's diagnosis: Ghostty 1.3.1 runs one process per
+  window (not single-instance); an instance whose window failed to initialize
+  lingers windowless, and enough of those make every subsequent window fail —
+  the bridge then re-posted "Waking…" forever while nothing appeared, until
+  Ghostty was quit manually. Three defenses, now safe because closing a window
+  no longer kills sessions via tmux hooks: spawned instances self-quit when
+  their window closes (`--quit-after-last-window-closed=true` is back); a
+  reaper kills windowless instances, but only ones **older than 60s**, making
+  0.2.8's fatal init-race (reaping a spawn still materializing) impossible; and
+  every spawn is now **verified** — if the terminal doesn't materialize, the
+  daemon kills the failed attempt, reaps, retries once, and otherwise reports
+  the wedge honestly instead of spamming "Waking…".
+- **Messages during a wake no longer stack extra terminals.** A resurrect in
+  flight now blocks duplicate spawns (and duplicate "Waking…" posts) until the
+  session is actually up; queued messages flush as before.
+
+[0.2.9]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.9
+
 ## [0.2.8] — 2026-07-24
 
 One batch release for today's run of features and fixes (staged internally as
