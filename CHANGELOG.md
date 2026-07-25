@@ -4,6 +4,20 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.10] — 2026-07-25
+
+### Added
+- **Auto-update.** The daemon checks GitHub at startup and every 6 hours; when a
+  new release lands it fast-forwards its git clone, runs `npm ci --omit=dev` if
+  `package.json` changed, and restarts itself via launchd — sessions keep
+  running and are re-adopted, and the control channel gets a "Bridge updated
+  vX → vY" note. Safety guards: never touches a checkout with local changes or
+  local commits (dev machines), only fast-forwards, waits for running turns to
+  finish (up to 10 min) before restarting, and skips silently when offline.
+  Opt out with `CCS_AUTO_UPDATE=0` in `~/.config/ccs/env`.
+
+[0.2.10]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.10
+
 ## [0.2.9] — 2026-07-25
 
 ### Fixed

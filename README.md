@@ -71,6 +71,12 @@ While a turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into a
 
 ## Operations
 
+- **Auto-update:** the daemon checks GitHub at startup and every 6 hours; when a
+  new release lands it fast-forwards its clone, refreshes dependencies if needed,
+  and restarts itself (sessions keep running — the daemon re-adopts them). It
+  never touches an install with local changes or local commits. Opt out with
+  `CCS_AUTO_UPDATE=0` in `~/.config/ccs/env`; update manually anytime with
+  `git -C <clone> pull` + the restart command below.
 - **Logs:** `tail -f daemon.log`
 - **Restart the daemon:** `launchctl kickstart -k gui/$(id -u)/si.sergej.claudeslackproxy` — never `kill` by port (that also kills attached channel servers).
 - **Uninstall:** `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/si.sergej.claudeslackproxy.plist`, then remove the symlink and the hooks block from `~/.claude/settings.json`.

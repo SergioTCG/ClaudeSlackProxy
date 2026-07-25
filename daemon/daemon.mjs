@@ -1037,6 +1037,42 @@ sm.on('interactive', async ({ body, ack }) => {
   } catch (e) { log('interactive error', String(e)) }
 })
 
+// ---- bridge self-update ------------------------------------------------------
+// Every install is a git clone running under launchd with KeepAlive, so keeping
+// users current is: fast-forward the clone, refresh deps if package.json moved,
+// then exit — launchd restarts the daemon on the new code (sessions keep running;
+// restart recovery re-adopts them). Checks at boot and every 6h.
+// Opt out with CCS_AUTO_UPDATE=0 in ~/.config/ccs/env.
+const pkgVersion = () => { try { return JSON.parse(fs.readFileSync(path.join(BRIDGE, 'package.json'), 'utf8')).version } catch { return '?' } }
+async function selfUpdate(trigger) {
+  if (process.env.CCS_AUTO_UPDATE === '0') return
+  const git = (...a) => execFile('git', ['-C', BRIDGE, ...a], { timeout: 60000 })
+  try { await git('rev-parse', '--git-dir') } catch { return } // not a git install
+  try { await git('fetch', '--quiet', 'origin') } catch { log('self-update: fetch failed (offline?)'); return }
+  let ahead = 0, behind = 0
+  try {
+    const { stdout } = await git('rev-list', '--left-right', '--count', 'HEAD...@{u}')
+    ;[ahead, behind] = stdout.trim().split(/\s+/).map(Number)
+  } catch { if (trigger === 'boot') log('self-update: no upstream branch — skipping'); return }
+  if (!behind) { if (trigger === 'boot') log(`self-update: up to date (v${pkgVersion()})`); return }
+  if ((await git('status', '--porcelain')).stdout.trim()) { log(`self-update: ${behind} commit(s) behind but working tree dirty — skipping (dev checkout?)`); return }
+  if (ahead) { log('self-update: local commits not on origin — skipping'); return }
+  const before = pkgVersion()
+  const pkgBefore = fs.readFileSync(path.join(BRIDGE, 'package.json'), 'utf8')
+  try { await git('merge', '--ff-only', '@{u}') } catch (e) { log('self-update: fast-forward failed', e?.stderr || String(e)); return }
+  if (fs.readFileSync(path.join(BRIDGE, 'package.json'), 'utf8') !== pkgBefore) {
+    log('self-update: package.json changed — refreshing dependencies')
+    try { await execFile('npm', ['ci', '--omit=dev'], { cwd: BRIDGE, timeout: 180000 }) }
+    catch { await execFile('npm', ['install', '--omit=dev'], { cwd: BRIDGE, timeout: 180000 }).catch(e => log('self-update: npm install failed', String(e))) }
+  }
+  const after = pkgVersion()
+  log(`self-update: v${before} → v${after}; restarting when idle`)
+  for (let i = 0; i < 120 && pollers.size; i++) await sleep(5000) // prefer restarting between turns (≤10 min)
+  if (state.control) await post(state.control, `⬆️ *Bridge updated* v${before} → v${after} — restarting the daemon. Sessions keep running.`).catch(() => {})
+  setTimeout(() => process.exit(0), 800) // flush the post; launchd (KeepAlive) brings us back on the new code
+}
+setInterval(() => selfUpdate('interval').catch(e => log('self-update error', String(e))), 6 * 3600 * 1000)
+
 // ---- liveness sweep ---------------------------------------------------------
 setInterval(async () => {
   for (const s of Object.values(state.sessions)) {
@@ -1114,4 +1150,5 @@ setInterval(async () => {
   await sm.start()
   log('socket mode connected — bridge ready')
   await readoptStatus() // recover live status for turns that were mid-flight on restart
+  selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })
