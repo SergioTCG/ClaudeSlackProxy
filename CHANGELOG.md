@@ -4,6 +4,30 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.12] — 2026-07-25
+
+### Added
+- **`/cc-usage` — token & cost reporting**, powered by
+  [ccusage](https://github.com/ryoppippi/ccusage) (bundled as a dependency, no
+  separate install). In a session channel it reports that **project**: the
+  current session's tokens/cost, the project total across all its sessions, and
+  the models used. In the control channel (or any unmapped channel) it reports
+  the **aggregate**: the last 7 days day by day, this month, and all time.
+  Project scoping works by matching ccusage's per-session rows against the
+  `.jsonl` transcripts in the project's `~/.claude/projects/<slug>/` directory.
+  Requires reinstalling the app manifest to register the new slash command.
+- **`/cc-usage days [n]`** — a per-day sheet (up to 14 days) with models used,
+  input/output tokens, cache write/read, total, and cost, plus a Σ row.
+  **`/cc-usage models`** — all-time per-model breakdown (in/out/cache w/r/cost).
+- **`/cc-usage limits` — your real plan limits, live.** Claude Code's statusline
+  feed carries the account rate-limit state, so the daemon now mirrors what
+  claude.ai/settings/usage shows: current 5-hour session usage % and reset time,
+  weekly all-models % and reset (any additional buckets appear automatically).
+  A one-line limits footer also rides on the other usage views when fresh data
+  is available. No scraping, no extra auth — it's already in the feed.
+
+[0.2.12]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.12
+
 ## [0.2.11] — 2026-07-25
 
 ### Added

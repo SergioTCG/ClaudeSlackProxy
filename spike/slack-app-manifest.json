@@ -14,6 +14,7 @@
       { "command": "/cc-effort", "description": "Show this session's effort level, or set it", "usage_hint": "[low | medium | high | max]", "should_escape": false },
       { "command": "/cc-new", "description": "Start a new Claude Code session (pick a project)", "usage_hint": "[folder] [--dsp] [--chrome]", "should_escape": false },
       { "command": "/cc-status", "description": "Session info here, or all sessions from the control channel", "should_escape": false },
+      { "command": "/cc-usage", "description": "Token & cost usage — project here, aggregate in control channel", "usage_hint": "[days [n] | models | limits]", "should_escape": false },
       { "command": "/cc-health", "description": "Bridge daemon health", "should_escape": false },
       { "command": "/cc-cleanup", "description": "Archive dormant session channels", "should_escape": false },
       { "command": "/cc-claim", "description": "Claim this bridge as its owner (first-run setup)", "should_escape": false },

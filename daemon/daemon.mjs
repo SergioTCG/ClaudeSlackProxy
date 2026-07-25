@@ -768,6 +768,118 @@ async function refreshCollabPanel(body) {
   } catch (e) { log('collab panel update failed', e?.data?.error || String(e)) }
 }
 
+// ---- usage reporting (ccusage) ----------------------------------------------
+// ccusage (bundled as a dependency) scans the local Claude Code transcripts and
+// prices them. Sessions are keyed by session id; a project's ids are exactly the
+// .jsonl basenames in its ~/.claude/projects/<slug>/ dir, which the daemon
+// already knows via each session's transcript path.
+async function ccusageJson(sub) {
+  const bin = path.join(BRIDGE, 'node_modules', '.bin', 'ccusage')
+  const { stdout } = await execFile(bin, [sub, '--json'], { timeout: 90000, maxBuffer: 32 << 20 })
+  return JSON.parse(stdout)
+}
+const fmtTok = n => n == null ? '—' : n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n))
+const fmtUsd = n => n == null ? '—' : '$' + n.toFixed(2)
+const shortModel = m => String(m).replace(/^claude-/, '').replace(/-\d{8}$/, '')
+
+// ---- plan rate limits (from the statusline feed) -----------------------------
+let rateLimits = null // { at, buckets: { five_hour: {used_percentage, resets_at}, seven_day: {...}, ... } }
+const LIMIT_LABELS = { five_hour: 'Current session (5h)', seven_day: 'Weekly · all models', seven_day_opus: 'Weekly · Opus' }
+const limitBar = pct => '▓'.repeat(Math.min(10, Math.round(pct / 10))).padEnd(10, '░') + ' ' + Math.round(pct) + '%'
+function fmtReset(epoch) {
+  if (!epoch) return '—'
+  const d = new Date(epoch * 1000), now = new Date()
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === now.toDateString() ? `today ${time}`
+    : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) + ` ${time}`
+}
+function limitLines() {
+  if (!rateLimits || Date.now() - rateLimits.at > 15 * 60000) return null
+  return Object.entries(rateLimits.buckets)
+    .filter(([, v]) => v && typeof v === 'object' && 'used_percentage' in v)
+    .map(([k, v]) => ({ label: LIMIT_LABELS[k] || k.replace(/_/g, ' '), pct: v.used_percentage, resets: fmtReset(v.resets_at) }))
+}
+function usageLimits(channel) {
+  const lines = limitLines()
+  if (!lines) return post(channel, 'No fresh limit data — it streams from live sessions. Write in any session channel, then retry.')
+  return postMd(channel,
+    `*Plan limits* — live from Claude Code\n` +
+    `| Limit | Used | Resets |\n|---|---|---|\n` +
+    lines.map(l => `| ${l.label} | ${limitBar(l.pct)} | ${l.resets} |`).join('\n'))
+}
+const limitFooter = () => {
+  const lines = limitLines()
+  return lines ? '\n_' + lines.map(l => `${l.label}: ${Math.round(l.pct)}% (resets ${l.resets})`).join(' · ') + '_' : ''
+}
+
+async function usageDays(channel, nArg) {
+  const n = Math.min(Math.max(parseInt(nArg, 10) || 7, 1), 14)
+  const j = await ccusageJson('daily')
+  const days = (j.daily || []).slice(-n)
+  if (!days.length) return post(channel, 'No usage data yet.')
+  const sum = k => days.reduce((a, d) => a + (d[k] || 0), 0)
+  const rows = days.map(d => {
+    const models = [...new Set((d.modelBreakdowns || []).map(b => shortModel(b.modelName)))].join(', ') || '—'
+    return `| ${d.period.slice(5)} | ${models} | ${fmtTok(d.inputTokens)} | ${fmtTok(d.outputTokens)} | ${fmtTok(d.cacheCreationTokens)} | ${fmtTok(d.cacheReadTokens)} | ${fmtTok(d.totalTokens)} | ${fmtUsd(d.totalCost)} |`
+  })
+  return postMd(channel,
+    `*Usage by day* — last ${days.length} day(s), all projects\n` +
+    `| Day | Models | In | Out | Cache W | Cache R | Total | Cost |\n|---|---|---|---|---|---|---|---|\n` +
+    rows.join('\n') + '\n' +
+    `| Σ | | ${fmtTok(sum('inputTokens'))} | ${fmtTok(sum('outputTokens'))} | ${fmtTok(sum('cacheCreationTokens'))} | ${fmtTok(sum('cacheReadTokens'))} | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(sum('totalCost'))} |` +
+    limitFooter())
+}
+
+async function usageModels(channel) {
+  const j = await ccusageJson('daily')
+  const agg = {}
+  for (const d of j.daily || []) for (const b of d.modelBreakdowns || []) {
+    const a = agg[b.modelName] ??= { in: 0, out: 0, cw: 0, cr: 0, cost: 0 }
+    a.in += b.inputTokens || 0; a.out += b.outputTokens || 0
+    a.cw += b.cacheCreationTokens || 0; a.cr += b.cacheReadTokens || 0; a.cost += b.cost || 0
+  }
+  const rows = Object.entries(agg).sort((a, b) => b[1].cost - a[1].cost).map(([m, a]) =>
+    `| ${shortModel(m)} | ${fmtTok(a.in)} | ${fmtTok(a.out)} | ${fmtTok(a.cw)} | ${fmtTok(a.cr)} | ${fmtUsd(a.cost)} |`)
+  if (!rows.length) return post(channel, 'No usage data yet.')
+  return postMd(channel,
+    `*Usage by model* — all time, all projects\n` +
+    `| Model | In | Out | Cache W | Cache R | Cost |\n|---|---|---|---|---|---|\n` + rows.join('\n'))
+}
+
+async function usageReport(channel) {
+  const session = channel !== state.control ? sessionByChannel(channel) : null
+  if (session) {
+    const dir = path.dirname(session.transcript || '.')
+    let ids = []
+    try { ids = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')).map(f => f.slice(0, -6)) } catch {}
+    if (!ids.length) return post(channel, 'No transcripts found for this project yet.')
+    const j = await ccusageJson('session')
+    const rows = (j.session || []).filter(r => ids.includes(r.period))
+    if (!rows.length) return post(channel, 'ccusage has no data for this project yet.')
+    const cur = rows.find(r => r.period === session.id)
+    const sum = k => rows.reduce((a, r) => a + (r[k] || 0), 0)
+    const models = [...new Set(rows.flatMap(r => r.modelsUsed || []))].join(' · ') || '—'
+    return postMd(channel,
+      `*Usage — ${path.basename(session.cwd)}*\n` +
+      `| Scope | Tokens | Cost |\n|---|---|---|\n` +
+      `| This session (${session.id.slice(0, 8)}) | ${fmtTok(cur?.totalTokens)} | ${fmtUsd(cur?.totalCost)} |\n` +
+      `| Project, all sessions (${rows.length}) | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(sum('totalCost'))} |\n` +
+      `_Models: ${models}_` + limitFooter())
+  }
+  // control channel (or any unmapped channel): aggregate across everything
+  const j = await ccusageJson('daily')
+  const days = j.daily || []
+  const month = new Date().toISOString().slice(0, 7)
+  const msum = k => days.filter(d => String(d.period).startsWith(month)).reduce((a, r) => a + (r[k] || 0), 0)
+  const t = j.totals || {}
+  const rows7 = days.slice(-7).map(d => `| ${d.period} | ${fmtTok(d.totalTokens)} | ${fmtUsd(d.totalCost)} |`).join('\n')
+  return postMd(channel,
+    `*Usage — all projects*\n` +
+    `| Day | Tokens | Cost |\n|---|---|---|\n${rows7}\n` +
+    `| This month | ${fmtTok(msum('totalTokens'))} | ${fmtUsd(msum('totalCost'))} |\n` +
+    `| All time | ${fmtTok(t.totalTokens)} | ${fmtUsd(t.totalCost)} |` + limitFooter())
+}
+
 // Command dispatch for the native /cc-* slash commands.
 async function dispatch(name, rest, channel) {
   if (name === 'help') {
@@ -778,6 +890,7 @@ async function dispatch(name, rest, channel) {
       '`/cc-update` — update Claude Code & restart this session with the same flags\n' +
       '`/cc-stop` — interrupt the running turn\n' +
       '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
+      '`/cc-usage [days [n] | models | limits]` — usage: project here / aggregate in control; `days` = per-day sheet, `models` = per-model, `limits` = plan limits (5h/weekly %)\n' +
       '`/cc-health` — bridge status\n' +
       '`/cc-kill [here|<id>]` — end a session (channel stays, resumable)\n' +
       '`/cc-cleanup` — archive dormant channels')
@@ -874,6 +987,16 @@ async function dispatch(name, rest, channel) {
     await tmuxInterrupt(session.tmux)
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
+  if (name === 'usage') {
+    const sub = (rest[0] || '').toLowerCase()
+    if (sub === 'limits') return usageLimits(channel) // instant — no transcript scan
+    await post(channel, '⏳ Crunching transcripts…')
+    try {
+      if (sub === 'days' || sub === 'daily') return await usageDays(channel, rest[1])
+      if (sub === 'models') return await usageModels(channel)
+      return await usageReport(channel)
+    } catch (e) { log('usage error', String(e)); return post(channel, `⚠️ ccusage failed: ${String(e?.message || e).slice(0, 200)}`) }
+  }
   if (name === 'update' || name === 'restart') {
     const session = sessionByChannel(channel)
     if (!session) return post(channel, 'Use `/cc-update` in a session channel — it updates Claude Code and restarts the session with the same flags.')
@@ -903,6 +1026,9 @@ http.createServer(async (req, res) => {
     res.end('ok')
     try {
       const j = JSON.parse(body)
+      // Plan rate limits (5h session %, weekly %, reset times) ride along on every
+      // statusline tick. They're account-wide, so one fresh copy serves all views.
+      if (j.rate_limits) rateLimits = { at: Date.now(), buckets: j.rate_limits }
       if (j.session_id) {
         const prev = sessionMeta.get(j.session_id) || {}
         const next = {

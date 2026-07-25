@@ -56,6 +56,7 @@ Commands are native Slack slash commands — type `/cc-` and Slack autocompletes
 | `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it — `/cc-model` with no arg lists available models with their real versions (read from the `claude` binary) |
 | `/cc-update` | update Claude Code (`claude update`) and restart this session with the same flags, resuming the conversation — how you pick up a new CLI build or a newly released model |
 | `/cc-status` | session info + manage collaborators here, or all sessions from the control channel |
+| `/cc-usage [days [n] \| models \| limits]` | token & cost usage ([ccusage](https://github.com/ryoppippi/ccusage), bundled) — project here / aggregate in control; `days` = per-day sheet (models, in/out, cache w/r), `models` = per-model totals, `limits` = live plan limits (5h session %, weekly %, reset times — same numbers as claude.ai/settings/usage) |
 | `/cc-health` | bridge status |
 | `/cc-stop` | interrupt the running turn |
 | `/cc-kill [<id>]` | end a session (channel stays, resumable) |
