@@ -6,7 +6,7 @@ import path from 'node:path'
 import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 import {
-  BRIDGE, log, sleep, loadEnv, loadState, saveState,
+  BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies,
@@ -14,7 +14,7 @@ import {
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
 loadEnv()
-const USER = process.env.SLACK_USER_ID
+let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
 const TEAM = process.env.SLACK_TEAM_ID
 const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const state = loadState()
@@ -983,11 +983,48 @@ sm.on('message', async ({ event, ack }) => {
 })
 
 // Native /cc-* slash commands (registered in the manifest, delivered over the socket).
+// First-run ownership claim. Fresh installs start with no SLACK_USER_ID — the
+// installer no longer asks anyone to dig their member ID out of their profile.
+// The first person to run /cc-claim becomes the owner, persisted to the config
+// env; until then the daemon trusts nobody and does nothing else.
+function persistOwner(uid) {
+  const f = path.join(CONFIG_DIR, 'env')
+  let env = ''
+  try { env = fs.readFileSync(f, 'utf8') } catch {}
+  env = /^SLACK_USER_ID=/m.test(env)
+    ? env.replace(/^SLACK_USER_ID=.*/m, `SLACK_USER_ID=${uid}`)
+    : env.trimEnd() + `\nSLACK_USER_ID=${uid}\n`
+  fs.writeFileSync(f, env, { mode: 0o600 })
+}
+// Reply visibly to a slash command in channels the bot may not be a member of.
+async function respondEphemeral(body, text) {
+  if (!body?.response_url) return
+  try {
+    await fetch(body.response_url, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, response_type: 'ephemeral' }),
+    })
+  } catch {}
+}
+
 sm.on('slash_commands', async ({ body, ack }) => {
   try { await ack() } catch {}
   try {
-    if (body.user_id !== USER) return
     const name = String(body.command || '').replace(/^\/cc-/, '')
+    if (!USER) {
+      if (name !== 'claim') return respondEphemeral(body, 'This bridge is unclaimed — run `/cc-claim` to become its owner.')
+      USER = body.user_id
+      persistOwner(USER)
+      log('owner claimed', USER)
+      await respondEphemeral(body, '👑 You own this bridge now. Check your new private #claude-code-bridge channel.')
+      if (state.control) {
+        try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
+        await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for commands — \`/cc-new\` starts a session, \`/cc-help\` lists everything.`).catch(() => {})
+      }
+      return
+    }
+    if (name === 'claim') return respondEphemeral(body, body.user_id === USER ? 'You already own this bridge.' : 'This bridge already has an owner.')
+    if (body.user_id !== USER) return
     const rest = String(body.text || '').trim().split(/\s+/).filter(Boolean)
     log('slash', body.command, JSON.stringify(body.text || ''))
     await dispatch(name, rest, body.channel_id)
@@ -1137,8 +1174,10 @@ setInterval(async () => {
     try {
       const c = await web.conversations.create({ name: 'claude-code-bridge', is_private: true })
       state.control = c.channel.id
-      await web.conversations.invite({ channel: c.channel.id, users: USER })
-      await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for commands — `/cc-new` to start a session, `/cc-status`, `/cc-help`.')
+      if (USER) { // fresh installs are unclaimed; /cc-claim invites the owner later
+        await web.conversations.invite({ channel: c.channel.id, users: USER })
+        await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for commands — `/cc-new` to start a session, `/cc-status`, `/cc-help`.')
+      }
     } catch (e) {
       if (e?.data?.error === 'name_taken') {
         const list = await web.conversations.list({ types: 'private_channel', limit: 200 })

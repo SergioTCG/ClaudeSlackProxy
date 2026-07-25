@@ -16,6 +16,7 @@
       { "command": "/cc-status", "description": "Session info here, or all sessions from the control channel", "should_escape": false },
       { "command": "/cc-health", "description": "Bridge daemon health", "should_escape": false },
       { "command": "/cc-cleanup", "description": "Archive dormant session channels", "should_escape": false },
+      { "command": "/cc-claim", "description": "Claim this bridge as its owner (first-run setup)", "should_escape": false },
       { "command": "/cc-update", "description": "Update Claude Code & restart this session with the same flags", "should_escape": false },
       { "command": "/cc-stop", "description": "Interrupt the running turn in this session", "should_escape": false },
       { "command": "/cc-kill", "description": "End this session (channel stays, resumable)", "should_escape": false },

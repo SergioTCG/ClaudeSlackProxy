@@ -1,10 +1,18 @@
 #!/bin/bash
 # ClaudeSlackProxy installer (macOS). Idempotent — safe to re-run.
-#   ./install.sh            interactive install
-#   curl -fsSL <raw>/install.sh | bash   (clones nothing; run from a clone)
+#   One-liner:     curl -fsSL https://raw.githubusercontent.com/SergioTCG/ClaudeSlackProxy/main/install.sh | bash
+#   From a clone:  ./install.sh
 set -euo pipefail
 
-BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/SergioTCG/ClaudeSlackProxy.git"
+BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || pwd)"
+# Piped via curl (or run outside a clone): clone to a standard spot, hand off.
+if [ ! -f "$BRIDGE/daemon/daemon.mjs" ]; then
+  DEST="${CCS_HOME:-$HOME/.claudeslackproxy}"
+  echo "Cloning ClaudeSlackProxy to $DEST..."
+  if [ -d "$DEST/.git" ]; then git -C "$DEST" pull --ff-only || true; else git clone "$REPO_URL" "$DEST"; fi
+  exec bash "$DEST/install.sh"
+fi
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 BIN_DIR="/opt/homebrew/bin"
 LABEL="si.sergej.claudeslackproxy"
@@ -37,25 +45,38 @@ chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/hooks/hook.sh" \
          "$BRIDGE/daemon/daemon.mjs" "$BRIDGE/channel/server.mjs" 2>/dev/null || true
 say "  linked $BIN_DIR/ccs"
 
-# ---- 4. config + Slack tokens ----------------------------------------------
+# ---- 4. config + Slack app (pre-filled creation link, 2 tokens, no IDs) -----
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_DIR/env" ]; then
-  if [ -t 0 ]; then
-    say "Slack tokens (create an app from spike/slack-app-manifest.yaml first):"
-    read -r -p "  SLACK_BOT_TOKEN (xoxb-…): " BOT
-    read -r -p "  SLACK_APP_TOKEN (xapp-…): " APP
-    read -r -p "  SLACK_USER_ID  (U…): " SUSER
-    read -r -p "  SLACK_TEAM_ID  (T…): " STEAM
+  if [ -r /dev/tty ]; then
+    MANIFEST="$BRIDGE/spike/slack-app-manifest.json"
+    APP_URL="https://api.slack.com/apps?new_app=1&manifest_yaml=$(node -e 'process.stdout.write(encodeURIComponent(require("fs").readFileSync(process.argv[1],"utf8")))' "$MANIFEST")"
+    say ""
+    say "Create your Slack app — the page opens PRE-FILLED, you just click through:"
+    say "  1. Pick your workspace → Next → Create."
+    say "  2. Left sidebar: Install App → Install to Workspace → Allow."
+    say "     Copy the Bot User OAuth Token (xoxb-…)."
+    say "  3. Basic Information → App-Level Tokens → Generate Token and Scopes:"
+    say "     name it anything, add scope connections:write, Generate. Copy it (xapp-…)."
+    open "$APP_URL" 2>/dev/null || say "  Open this URL: $APP_URL"
+    read -r -p "  SLACK_BOT_TOKEN (xoxb-…): " BOT < /dev/tty
+    read -r -p "  SLACK_APP_TOKEN (xapp-…): " APP < /dev/tty
+    # Validate both tokens live and derive the team id — typos fail here, not at 2am.
+    AUTH="$(curl -s -H "Authorization: Bearer $BOT" https://slack.com/api/auth.test)"
+    [ "$(printf %s "$AUTH" | jq -r .ok)" = "true" ] || { say "  ✗ bot token rejected ($(printf %s "$AUTH" | jq -r .error)) — re-run install.sh"; exit 1; }
+    STEAM="$(printf %s "$AUTH" | jq -r .team_id)"
+    CONN="$(curl -s -X POST -H "Authorization: Bearer $APP" https://slack.com/api/apps.connections.open)"
+    [ "$(printf %s "$CONN" | jq -r .ok)" = "true" ] || { say "  ✗ app token rejected ($(printf %s "$CONN" | jq -r .error)) — needs scope connections:write; re-run install.sh"; exit 1; }
+    say "  ✓ tokens valid for workspace \"$(printf %s "$AUTH" | jq -r .team)\" (team $STEAM)"
     umask 177
     cat > "$CONFIG_DIR/env" <<EOF
 SLACK_BOT_TOKEN=$BOT
 SLACK_APP_TOKEN=$APP
-SLACK_USER_ID=$SUSER
 SLACK_TEAM_ID=$STEAM
 EOF
-    say "  wrote $CONFIG_DIR/env"
+    say "  wrote $CONFIG_DIR/env — ownership is claimed from Slack afterwards (/cc-claim)"
   else
-    say "  ! No TTY — create $CONFIG_DIR/env yourself with SLACK_BOT_TOKEN / SLACK_APP_TOKEN / SLACK_USER_ID / SLACK_TEAM_ID, then re-run."
+    say "  ! No TTY — create $CONFIG_DIR/env with SLACK_BOT_TOKEN / SLACK_APP_TOKEN, then re-run."
     exit 1
   fi
 else
@@ -99,6 +120,9 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 say "  loaded LaunchAgent $LABEL"
 
 say ""
-say "✅ Installed. The daemon is running; it creates a private #claude-code-bridge control channel."
+say "✅ Installed — one step left, in Slack:"
+say "   Run /cc-claim in any channel to become the bridge's owner."
+say "   (You'll be invited to a private #claude-code-bridge control channel.)"
+say ""
 say "   Start a bridged session anywhere:   ccs --dangerously-skip-permissions"
 say "   Logs:  tail -f $LOG"

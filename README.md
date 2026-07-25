@@ -25,21 +25,18 @@ A launchd daemon owns one Slack [Socket Mode](https://docs.slack.dev/apis/events
 ## Install
 
 ```bash
-git clone https://github.com/SergioTCG/ClaudeSlackProxy.git
-cd ClaudeSlackProxy
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/ClaudeSlackProxy/main/install.sh | bash
 ```
 
-The installer checks prerequisites, installs deps, symlinks `ccs` into `/opt/homebrew/bin`, registers the hooks in `~/.claude/settings.json` (merging, never clobbering), writes your tokens to `~/.config/ccs/env`, and loads the daemon as a LaunchAgent. It's idempotent — safe to re-run.
+Three steps, mostly clicking:
 
-### Set up the Slack app first
+1. **The installer opens a pre-filled Slack app page** (your app, your workspace — nothing is shared). Click **Create**, then **Install App → Install to Workspace**, then generate an app-level token under **Basic Information → App-Level Tokens** (scope `connections:write`).
+2. **Paste the two tokens** (`xoxb-…`, `xapp-…`) into the installer. It validates both live and figures out the team ID itself.
+3. **Run `/cc-claim` in Slack.** The daemon records you as the owner — no digging your member ID out of your profile. Only the owner's messages are ever acted on (plus any [collaborators](#use) you whitelist per channel).
 
-1. At [api.slack.com/apps](https://api.slack.com/apps) → **Create New App → From a manifest**, pick your workspace, and paste [`spike/slack-app-manifest.yaml`](spike/slack-app-manifest.yaml).
-2. **Basic Information → App-Level Tokens**: generate a token with `connections:write` → this is your `xapp-…` (`SLACK_APP_TOKEN`).
-3. **Install App** → install to the workspace → copy the **Bot User OAuth Token** → `xoxb-…` (`SLACK_BOT_TOKEN`).
-4. Your `SLACK_USER_ID` (`U…`) and `SLACK_TEAM_ID` (`T…`) are visible in your Slack profile / workspace details. Only messages from that one user ID are ever acted on.
+That's the whole setup. The installer also clones to `~/.claudeslackproxy` (or runs from your own clone), checks prerequisites, installs deps, symlinks `ccs`, registers hooks in `~/.claude/settings.json` (merging, never clobbering), and loads the daemon as a LaunchAgent. Idempotent — safe to re-run. From then on the bridge [keeps itself up to date](#operations).
 
-`install.sh` prompts for these four values.
+> **Why isn't this a public "Add to Slack" app?** Socket Mode delivers an app's events over the app-level token — one shared stream per *app*, capped at 10 connections. A single public app would fan every workspace's events across every user's local daemon. Your own app means your tokens and your traffic never leave your machine, which is the point.
 
 ## Use
 

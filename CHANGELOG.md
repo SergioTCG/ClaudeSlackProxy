@@ -4,6 +4,29 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.11] — 2026-07-25
+
+### Added
+- **Near-one-click install.** `curl -fsSL …/install.sh | bash` now clones the
+  repo itself, opens Slack's app-creation page **pre-filled with the manifest**
+  (a shareable `new_app=1&manifest_yaml=` deep link — no copy-pasting JSON),
+  validates both pasted tokens live (`auth.test` + `apps.connections.open`, so
+  typos fail immediately), and derives the team ID automatically.
+- **`/cc-claim` — ownership without hunting for your member ID.** Fresh installs
+  start unclaimed; the first person to run `/cc-claim` becomes the owner
+  (persisted to `~/.config/ccs/env`, invited to the control channel). Until
+  claimed the daemon trusts nobody and does nothing else. `SLACK_USER_ID` no
+  longer needs to be looked up by hand.
+
+Install friction drops to: one command, ~4 clicks in Slack, two token pastes,
+one `/cc-claim`. A public "Add to Slack" app is deliberately not offered:
+Socket Mode delivers an app's events over the app-level token — one shared
+stream per app (10-connection cap) — so a shared public app would route every
+workspace's events to every user's local daemon. Per-user apps keep each
+user's tokens and traffic on their own machine.
+
+[0.2.11]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.11
+
 ## [0.2.10] — 2026-07-25
 
 ### Added
