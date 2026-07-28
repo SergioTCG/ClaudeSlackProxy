@@ -192,23 +192,96 @@ function extractSpinner(pane) {
   }
   return null
 }
+// ---- interactive question forms → Slack --------------------------------------
+// Claude Code can pause a turn on an interactive question (numbered options,
+// sometimes a multi-tab wizard ending in a Submit screen). In the terminal a
+// digit keypress selects AND advances; over Slack the turn just looks stalled.
+// Detect the form in the pane, mirror it as buttons, and map answers back to
+// keystrokes. Every screen — including "Ready to submit?" — is uniformly
+// "question + numbered options", so one mechanism drives the whole wizard.
+const qforms = new Map() // sid → { ts, hash, options: [{n, label}], at }
+function extractQuestionForm(pane) {
+  const lines = pane.split('\n')
+  const opts = [], optIdx = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*(❯\s*)?(\d{1,2})\.\s+(.+?)\s*$/)
+    if (m && !opts.some(o => o.n === Number(m[2]))) { opts.push({ n: Number(m[2]), label: m[3] }) ; optIdx.push(i) }
+  }
+  if (opts.length < 2) return null
+  // Real forms (unlike numbered lists in prose) have a select footer, a tab bar,
+  // or a ❯ highlight on an option line.
+  const signature = /Enter to select/i.test(pane) || /[☒☐✔].*[☒☐✔]/.test(pane) || optIdx.some(i => /^\s*❯/.test(lines[i]))
+  if (!signature) return null
+  opts.sort((a, b) => a.n - b.n)
+  // Question: the non-separator lines directly above the first option (keeps
+  // review bullets like "● …" / "→ …"), capped for sanity.
+  const q = []
+  for (let i = optIdx[0] - 1; i >= 0 && q.length < 8; i--) {
+    const t = lines[i].trim()
+    if (/^[─-]{5,}$/.test(t)) { if (q.length) break; continue }
+    if (!t || /^[←→]/.test(t) || /Enter to select/i.test(t)) break
+    q.unshift(t)
+  }
+  const question = q.join('\n').trim() || 'Claude asks:'
+  return { question, options: opts, hash: question + '|' + opts.map(o => o.n + o.label).join('|') }
+}
+async function relayQuestionForm(session, form) {
+  const prev = qforms.get(session.id)
+  if (prev && prev.hash === form.hash) return // unchanged screen
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `❓ *Claude asks:*\n${escapeText(form.question).slice(0, 2800)}` } },
+    { type: 'actions', block_id: `qform_${session.id.slice(0, 8)}`, elements: form.options.slice(0, 10).map(o => ({
+      type: 'button', text: { type: 'plain_text', text: `${o.n}. ${o.label}`.slice(0, 75) }, action_id: `qform_${o.n}`, value: `qform:${session.id}:${o.n}`,
+    })) },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'tap an option — or reply with just the number' }] },
+  ]
+  let ts = prev?.ts
+  try {
+    if (ts) await web.chat.update({ channel: session.channel, ts, text: '❓ Claude asks a question', blocks })
+    else ts = (await enqueue(session.channel, () => web.chat.postMessage({ channel: session.channel, text: '❓ Claude asks a question', blocks }))).ts
+  } catch (e) { log('qform relay error', e?.data?.error || String(e)); return }
+  qforms.set(session.id, { ts, hash: form.hash, options: form.options, at: Date.now() })
+  log('qform relayed', session.id.slice(0, 8), JSON.stringify(form.question.slice(0, 60)))
+}
+async function answerQuestionForm(session, n, label) {
+  await execFile('tmux', ['send-keys', '-t', session.tmux, String(n)]) // digit selects + advances
+  const q = qforms.get(session.id)
+  if (q) {
+    q.hash = 'answered:' + Date.now() // next screen (if any) updates the same message
+    try { await web.chat.update({ channel: session.channel, ts: q.ts, text: `✅ ${label}`, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `❓ → ✅ *${escapeText(label)}*` } }] }) } catch {}
+  }
+  log('qform answered', session.id.slice(0, 8), n, JSON.stringify(label.slice(0, 50)))
+}
+async function clearQuestionForm(session) {
+  const q = qforms.get(session.id)
+  if (!q) return
+  qforms.delete(session.id)
+  try { await web.chat.update({ channel: session.channel, ts: q.ts, text: '✅ Question answered', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❓ → ✅ _answered — the turn continues_' } }] }) } catch {}
+}
+
 function startPoller(session) {
   if (pollers.has(session.id)) return
   const p = { timer: null, last: '', stopped: false, sawSpinner: false, idle: 0 }
   p.timer = setInterval(async () => {
     if (p.stopped || !session.tmux || !(session.pid && pidAlive(session.pid))) return
-    const line = extractSpinner(await tmuxCapture(session.tmux))
+    const pane = await tmuxCapture(session.tmux)
+    const line = extractSpinner(pane)
     if (p.stopped) return // Stop fired during the capture — don't re-post
     if (line) {
       p.sawSpinner = true; p.idle = 0
+      if (qforms.has(session.id)) await clearQuestionForm(session) // answered (Slack or terminal) — turn resumed
       if (line !== p.last) { p.last = line; await setStatus(session, line) }
-    } else if (p.sawSpinner && !hasPendingPerm(session) && ++p.idle >= 4) {
-      // The spinner vanished for ~12s after a turn was running: the turn ended.
-      // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
-      // long/compacted turn), do it here so the response is never silently lost.
-      p.stopped = true
-      log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
-      await finalizeTurn(session)
+    } else {
+      const form = extractQuestionForm(pane)
+      if (form) { p.idle = 0; await relayQuestionForm(session, form); return } // waiting on the user, not finished
+      if (p.sawSpinner && !hasPendingPerm(session) && ++p.idle >= 4) {
+        // The spinner vanished for ~12s after a turn was running: the turn ended.
+        // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
+        // long/compacted turn), do it here so the response is never silently lost.
+        p.stopped = true
+        log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
+        await finalizeTurn(session)
+      }
     }
   }, 3000)
   pollers.set(session.id, p)
@@ -225,6 +298,7 @@ const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel
 async function finalizeTurn(session) {
   stopPoller(session)
   await clearStatus(session)
+  await clearQuestionForm(session)
   if (session.transcript) await waitTranscriptSettle(session.transcript)
   const text = readNewAssistantText(session)
   if (text) await postMd(session.channel, text)
@@ -325,7 +399,14 @@ async function onHook(body, ppid, tmux, flags) {
 
   let session = state.sessions[sid] || sessionByPid(pid)
   if (!session) {
-    session = { id: sid, pid, cwd: body.cwd, tmux, transcript: body.transcript_path, offset: 0, channel: null, statusTs: null }
+    // Adopt at the transcript's current end. A session the daemon has never seen
+    // may carry a long pre-bridge history (e.g. resuming an old session into a
+    // new channel); an offset of 0 would replay ALL of it into Slack on the
+    // first turn. Anchoring to EOF mirrors only from adoption onward. Brand-new
+    // sessions have an empty/absent transcript, so this stays 0 for them.
+    let tail = 0
+    try { tail = fs.statSync(body.transcript_path).size } catch {}
+    session = { id: sid, pid, cwd: body.cwd, tmux, transcript: body.transcript_path, offset: tail, channel: null, statusTs: null }
     state.sessions[sid] = session
   }
   // keep identity fresh (handles /clear: new sid, same pid)
@@ -614,6 +695,23 @@ async function handleSlackMessage(channel, text, sender) {
     if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new` to start a session, or `/cc-status` to list them.')
     log('inbound (unmapped channel, ignored)', channel)
     return
+  }
+  // An open question form eats pasted text, so route replies through it instead:
+  // a bare number picks that option; anything else goes via "Type something" /
+  // "Chat about this" when the form offers one.
+  const q = qforms.get(session.id)
+  if (q && Date.now() - q.at < 30 * 60000 && session.tmux && (await tmuxAlive(session.tmux))) {
+    if (/^\d{1,2}$/.test(trimmed)) {
+      const o = q.options.find(x => String(x.n) === trimmed)
+      if (o) return answerQuestionForm(session, o.n, o.label)
+    }
+    const free = q.options.find(o => /type something/i.test(o.label)) || q.options.find(o => /chat about this/i.test(o.label))
+    if (free) {
+      await answerQuestionForm(session, free.n, `${free.label} → “${trimmed.slice(0, 60)}${trimmed.length > 60 ? '…' : ''}”`)
+      await sleep(700)
+      return tmuxPaste(session.tmux, trimmed)
+    }
+    return post(channel, '❓ A question form is open — tap a button above or reply with just its number.')
   }
   await injectText(session, trimmed)
 }
@@ -1191,6 +1289,13 @@ sm.on('interactive', async ({ body, ack }) => {
         await refreshCollabPanel(body)
         await post(channel, `🚫 Removed <@${uid}> — they can no longer post here.`)
       }
+      return
+    }
+    if (String(action.action_id || '').startsWith('qform_')) {
+      const [, sid, n] = String(action.value || '').split(':')
+      const session = state.sessions[sid]
+      const o = session && qforms.get(sid)?.options.find(x => String(x.n) === n)
+      if (session && o && session.tmux && (await tmuxAlive(session.tmux))) await answerQuestionForm(session, o.n, o.label)
       return
     }
     if (action.value) {

@@ -4,6 +4,33 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.14] — 2026-07-28
+
+One release covering two staged changes (0.2.13 was never tagged separately).
+
+### Added
+- **Interactive question forms are relayed to Slack.** Claude Code can pause a
+  turn on a numbered-options question (sometimes a multi-tab wizard ending in a
+  review/Submit screen); previously the bridge showed nothing — the session just
+  looked frozen, and replies typed in Slack were eaten by the open form. The
+  live-status poller now detects an open form in the terminal, mirrors it to the
+  channel as **buttons** (question + options, updating one message in place as
+  the wizard advances), and maps answers back to keystrokes. Reply with a bare
+  number instead of tapping if you prefer; free-text replies route through the
+  form's "Type something" / "Chat about this" option when it offers one. A form
+  waiting for input also no longer trips the poller's turn-end fallback.
+
+### Fixed
+- **Adopting an existing session no longer risks replaying its entire history
+  into Slack.** A session the daemon had never seen (e.g. resuming a pre-bridge
+  conversation into a new channel) registered with a transcript offset of 0, so
+  the first completed turn would have mirrored the whole historical transcript
+  into the channel as one giant dump. Registration now anchors to the
+  transcript's current end — only activity from adoption onward is mirrored.
+  Brand-new sessions are unaffected (their transcript starts empty).
+
+[0.2.14]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.14
+
 ## [0.2.12] — 2026-07-25
 
 ### Added
