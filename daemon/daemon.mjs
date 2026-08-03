@@ -399,6 +399,17 @@ async function onHook(body, ppid, tmux, flags) {
 
   let session = state.sessions[sid] || sessionByPid(pid)
   if (!session) {
+    // Claude Code 2.1.220+ spawns internal background workers — a transient
+    // per-user daemon, warm "spare" sessions, and background agents — which
+    // inherit CCS_BRIDGE and the global hooks from their parent session. They
+    // are not user terminals: registering them creates ghost channels. Gate NEW
+    // registrations on the resolved process's command line.
+    let cmdline = ''
+    try { cmdline = (await execFile('ps', ['-o', 'command=', '-p', String(pid)])).stdout } catch {}
+    if (/--agent |bg-pty-host|bg-spare|daemon run|--session-id/.test(cmdline)) {
+      log('ignoring internal claude worker', sid.slice(0, 8), 'pid', pid)
+      return
+    }
     // Adopt at the transcript's current end. A session the daemon has never seen
     // may carry a long pre-bridge history (e.g. resuming an old session into a
     // new channel); an offset of 0 would replay ALL of it into Slack on the

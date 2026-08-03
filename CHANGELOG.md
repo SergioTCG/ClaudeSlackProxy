@@ -4,6 +4,21 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.15] — 2026-08-03
+
+### Fixed
+- **Claude Code's internal background workers no longer create ghost channels.**
+  Claude Code 2.1.220+ spawns internal helper processes — a transient per-user
+  daemon, warm "spare" sessions, and background agents — which inherit
+  `CCS_BRIDGE` and the global hooks from their parent session. Their SessionStart
+  hooks made the bridge register them as real sessions and create channels
+  (e.g. `#code-<stamp>`) out of nowhere. New registrations are now gated on the
+  resolved process's command line: anything carrying internal-worker markers
+  (`--agent`, `bg-pty-host`, `bg-spare`, `daemon run`, `--session-id`) is
+  ignored. Existing bridged sessions are unaffected.
+
+[0.2.15]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.15
+
 ## [0.2.14] — 2026-07-28
 
 One release covering two staged changes (0.2.13 was never tagged separately).
