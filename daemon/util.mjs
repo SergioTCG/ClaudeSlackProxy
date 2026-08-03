@@ -216,7 +216,12 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) 
   // windowless instances (enough of those and new windows fail to initialize).
   // Safe now that closing a window no longer kills sessions via tmux hooks —
   // the flag only ever quits the instance it launches.
-  await execFile('open', ['-na', 'Ghostty.app', '--args',
+  // Optional: CCS_GHOSTTY_HIDDEN=1 runs each spawned instance as an accessory
+  // app — windows stay fully visible and clickable but add no Dock icon or
+  // Cmd-Tab entry. Default is normal Dock presence (one icon per session,
+  // since each window is its own instance).
+  const hidden = process.env.CCS_GHOSTTY_HIDDEN === '1' ? ['--macos-hidden=always'] : []
+  await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
     '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner])
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {

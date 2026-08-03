@@ -4,6 +4,26 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.16] — 2026-08-03
+
+### Added
+- **Optional dockless terminals.** Each session's window is its own Ghostty
+  instance (macOS Ghostty has no IPC to open windows in a running instance), so
+  every session normally adds a Dock icon. Set `CCS_GHOSTTY_HIDDEN=1` in
+  `~/.config/ccs/env` to spawn them in accessory mode instead: windows stay
+  fully visible and clickable but add no Dock icon or Cmd-Tab entry. Default
+  remains one Dock icon per session.
+
+### Fixed
+- **Launching `ccs` inside an existing tmux session now bridges fully.** The
+  self-wrapping branch sets `CCS_TMUX`, but running `ccs` from within tmux
+  skipped the wrap and left it empty — the channel got created, yet
+  Slack→terminal injection, `/cc-stop`, and the live-status poller silently
+  targeted nothing. `ccs` now derives the name from the surrounding tmux
+  session (`tmux display-message -p '#S'`) when unset.
+
+[0.2.16]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.16
+
 ## [0.2.15] — 2026-08-03
 
 ### Fixed

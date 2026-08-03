@@ -26,6 +26,13 @@ if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; t
     "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "$SOURCE") $q"
 fi
 
+# Running inside an existing tmux session (no self-wrap): derive the session
+# name so the daemon can drive this pane — with CCS_TMUX empty the channel still
+# gets created, but Slack→terminal injection and /cc-stop silently target nothing.
+if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
+  export CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
+fi
+
 # Generate the channel MCP config with the resolved server path (no hardcoding).
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_DIR/mcp.json" <<EOF
