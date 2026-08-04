@@ -221,8 +221,14 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) 
   // Cmd-Tab entry. Default is normal Dock presence (one icon per session,
   // since each window is its own instance).
   const hidden = process.env.CCS_GHOSTTY_HIDDEN === '1' ? ['--macos-hidden=always'] : []
+  // Strip bridge vars from the environment `open` hands the instance: a window
+  // opened later inside it (Cmd+N, scripts) must not inherit another session's
+  // CCS_TMUX/CCS_FLAGS — that's how one session's channel ended up pasting into
+  // a different session's terminal.
+  const env = { ...process.env }
+  for (const k of Object.keys(env)) if (/^(CCS_|CLAUDE|ANTHROPIC_)/.test(k)) delete env[k]
   await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
-    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner])
+    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner], { env })
   log('spawned ghostty', { cwd, args, tmuxName })
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when

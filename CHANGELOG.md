@@ -4,6 +4,32 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.17] — 2026-08-04
+
+### Fixed
+- **Cross-session message routing corruption.** A session spawned from a shell
+  that inherited another session's `CCS_TMUX` (env leaks through `open` /
+  Ghostty windows / scripts run inside bridged sessions) registered claiming
+  the other session's tmux — so its channel's Slack messages were pasted into
+  the wrong terminal, and mirrored back into the wrong channel. Three layers:
+  `ccs` now unsets any inherited `CCS_TMUX` (and hardens PATH so the tmux
+  self-wrap can't silently degrade in bare login shells); `ghosttySpawn` strips
+  all `CCS_*` variables from the environment handed to `open`; and the daemon
+  now **validates every tmux claim** — a session's tmux name is only accepted
+  if the claiming claude process actually descends from one of that tmux
+  session's panes (poisoned stored claims heal to null, falling back to
+  channel-plugin injection).
+- **Inherited Claude identity no longer produces phantom "child sessions."**
+  The same env leak could carry `CLAUDE_CODE_CHILD_SESSION` /
+  `CLAUDE_CODE_SESSION_ID` / `CLAUDE_PID` into a new `ccs` launch, making the
+  new claude believe it was a child of another session — it then wrote **no
+  transcript of its own**, silently breaking response mirroring and resume.
+  `ccs` now sheds all inherited Claude-identity variables before exec, and the
+  daemon's spawner strips `CLAUDE*`/`ANTHROPIC_*`/`CCS_*` from the environment
+  it hands `open`.
+
+[0.2.17]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.17
+
 ## [0.2.16] — 2026-08-03
 
 ### Added

@@ -391,10 +391,36 @@ function readNewAssistantText(session) {
 }
 
 // ---- hook handling ----------------------------------------------------------
+// A session's tmux claim is only trusted if the claiming claude process really
+// lives inside that tmux (its pid descends from one of the session's panes).
+// Inherited CCS_TMUX env leaks made new sessions claim ANOTHER session's tmux,
+// so their Slack messages were pasted into the wrong terminal. Cached per
+// pid+name — one validation per session lifetime in practice.
+const tmuxClaimCache = new Map()
+async function validTmuxClaim(pid, tname) {
+  if (!tname) return false
+  const key = pid + ':' + tname
+  if (tmuxClaimCache.has(key)) return tmuxClaimCache.get(key)
+  let ok = false
+  try {
+    const panePids = (await execFile('tmux', ['list-panes', '-t', tname, '-F', '#{pane_pid}']))
+      .stdout.split('\n').filter(Boolean).map(Number)
+    let p = Number(pid)
+    for (let i = 0; i < 12 && p > 1 && !ok; i++) {
+      if (panePids.includes(p)) ok = true
+      else p = Number((await execFile('ps', ['-o', 'ppid=', '-p', String(p)])).stdout.trim()) || 0
+    }
+  } catch { ok = false } // tmux session doesn't exist → claim invalid
+  tmuxClaimCache.set(key, ok)
+  if (!ok) log('rejected tmux claim', tname, 'by pid', pid)
+  return ok
+}
+
 async function onHook(body, ppid, tmux, flags) {
   const ev = body.hook_event_name
   const pid = await resolveClaudePid(ppid)
   if (!pid) return
+  if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
   const sid = body.session_id
 
   let session = state.sessions[sid] || sessionByPid(pid)
@@ -430,6 +456,8 @@ async function onHook(body, ppid, tmux, flags) {
   }
   session.pid = pid
   session.tmux = tmux || session.tmux
+  // Heal stored claims too (a poisoned name may have been recorded before the guard).
+  if (session.tmux && !tmux && !(await validTmuxClaim(pid, session.tmux))) session.tmux = null
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
   if (flags != null && flags !== '') session.launchFlags = flags

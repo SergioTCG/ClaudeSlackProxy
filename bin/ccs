@@ -13,8 +13,22 @@ while [ -h "$SOURCE" ]; do
 done
 BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
+# Bare login shells (scripts, Ghostty -e) may lack Homebrew on PATH — without
+# tmux findable, the self-wrap silently degrades to an undrivable session.
+command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 export CCS_BRIDGE=1
 export CCS_FLAGS="$*"   # launch flags, so the daemon can replay them on resume
+# Never trust an inherited CCS_TMUX: env leaks (open/Ghostty windows spawned
+# from a bridged shell) made new sessions claim ANOTHER session's tmux, so
+# Slack messages for them were pasted into the wrong terminal. The self-wrap
+# sets its own name; the in-tmux path derives it below.
+unset CCS_TMUX
+# Shed any inherited Claude identity: a shell descended from a bridged session
+# carries CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_SESSION_ID / CLAUDE_PID, and a
+# claude launched with those believes it's a CHILD of that session — it then
+# writes no transcript of its own, breaking resume and Slack mirroring entirely.
+unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_PID \
+      CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDECODE 2>/dev/null || true
 
 if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
   TN="ccs-$$-$RANDOM"
