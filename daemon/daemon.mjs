@@ -9,7 +9,7 @@ import {
   BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
-  ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies,
+  ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -139,14 +139,21 @@ async function updateTopic(session) {
   if (!session.channel) return
   const meta = sessionMeta.get(session.id) || {}
   const branch = await gitBranch(session.cwd)
+  // Fall back to persisted values — the in-memory meta is empty right after a
+  // daemon restart, and pushing a degraded topic would wipe model/effort from
+  // the channel (and the window title) until the session next reports in.
+  const prettify = m => m ? String(m).replace(/^claude-/, '').replace(/-(\d)/g, ' $1').replace(/^\w/, c => c.toUpperCase()) : m
+  const model = meta.model || session.model || prettify(readModel(session))
+  const effort = meta.effort || session.effort
   const topic = [
     session.cwd,
     branch || 'no-branch',
     session.worktree ? 'wt:' + session.worktree : '',
-    meta.model, meta.effort,
+    model, effort,
   ].filter(Boolean).join(' · ')
   if (topic === lastTopic.get(session.channel)) return
   lastTopic.set(session.channel, topic)
+  if (session.tmux) tmuxTitle(session.tmux, topic) // window title mirrors the channel topic
   try { await web.conversations.setTopic({ channel: session.channel, topic: topic.slice(0, 250) }) }
   catch (e) { log('setTopic error', e?.data?.error || String(e)) }
 }
@@ -467,6 +474,7 @@ async function onHook(body, ppid, tmux, flags) {
     restarting.delete(sid) // a resumed /cc-update session is up; re-enable the "ended" notice
     resurrectInFlight.delete(sid) // the wake completed; future resurrects are legitimate
     if (session.tmux) clearKillOnClose(session.tmux) // window close must NOT kill the session (Ghostty single-instance cascade)
+    if (session.tmux) tmuxTitle(session.tmux, session.cwd || 'ccs') // initial title; updateTopic enriches it (folder · branch · model · effort)
     const ch = await ensureChannel(session)
     const src = body.source
     if (src === 'resume') await post(ch, '▶️ *Resumed*')
@@ -1180,6 +1188,7 @@ http.createServer(async (req, res) => {
         if (session?.channel) {
           if (j.cwd) session.cwd = j.cwd // folder can change; keep it current
           if (j.effort?.level && session.effort !== j.effort.level) { session.effort = j.effort.level; saveState(state) } // persist for resume
+          if (j.model?.display_name && session.model !== j.model.display_name) { session.model = j.model.display_name; saveState(state) } // persist so topics survive restarts
           const changed = prev.model !== next.model || prev.effort !== next.effort
           if (changed || Date.now() - (lastTopicAt.get(session.channel) || 0) > 6000) {
             lastTopicAt.set(session.channel, Date.now())
@@ -1438,7 +1447,7 @@ setInterval(async () => {
   // Remove any old client-detached → kill-session hooks from existing live sessions,
   // so a Ghostty single-instance window teardown can no longer cascade-kill them.
   for (const s of Object.values(state.sessions)) {
-    if (s.tmux && s.pid && pidAlive(s.pid)) clearKillOnClose(s.tmux)
+    if (s.tmux && s.pid && pidAlive(s.pid)) { clearKillOnClose(s.tmux); updateTopic(s).catch(() => {}) }
   }
   if (!state.control) {
     try {

@@ -4,6 +4,26 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.18] — 2026-08-04
+
+### Added
+- **Single-icon mode (`CCS_GHOSTTY_SINGLE=1`)** — all bridge terminals under
+  ONE Ghostty Dock icon, right-click listing every session window by name. A
+  dedicated bridge instance runs the new `ccs-window` dispatcher as its
+  `command`: every new window pops the next pending session from a spool and
+  attaches to its tmux. The daemon creates sessions detached, then requests a
+  window — the first via launching the instance, later ones via a scripted
+  File → New Window click (requires a one-time Accessibility grant for the
+  daemon's `node`; without it, spawns fall back to today's per-instance windows
+  and nothing breaks). Windows the user opens manually (Cmd+N) become plain
+  shells when nothing is pending.
+- **Window titles mirror the channel topic.** Every session window is titled
+  exactly like its Slack channel topic — `folder · branch · model · effort` —
+  and updates whenever the topic does, so the Dock's window list reads the same
+  as your Slack sidebar.
+
+[0.2.18]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.18
+
 ## [0.2.17] — 2026-08-04
 
 ### Fixed

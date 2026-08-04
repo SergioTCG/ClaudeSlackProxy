@@ -159,6 +159,16 @@ export async function clearKillOnClose(tname) {
   try { await execFile('tmux', ['set-hook', '-u', '-t', tname, 'client-detached']) } catch {}
 }
 
+// Let tmux own the outer terminal title and pin it to a literal string (mirrors
+// the Slack channel topic: folder · branch · model · effort). '#' is escaped so
+// tmux never interprets format directives in branch/path names.
+export async function tmuxTitle(tname, text) {
+  try {
+    await execFile('tmux', ['set-option', '-t', tname, 'set-titles', 'on'])
+    await execFile('tmux', ['set-option', '-t', tname, 'set-titles-string', String(text).replace(/#/g, '##')])
+  } catch {}
+}
+
 // Send Escape — Claude Code's interrupt key — to abort the running turn.
 export async function tmuxInterrupt(tname) {
   await execFile('tmux', ['send-keys', '-t', tname, 'Escape'])
@@ -208,28 +218,95 @@ export async function reapGhosttyZombies(minAgeSec = 60) {
   return reaped
 }
 
-export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
-  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
-  const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
-  // One Ghostty process per window. --quit-after-last-window-closed makes the
-  // instance exit when its window closes, so ended sessions don't pile up as
-  // windowless instances (enough of those and new windows fail to initialize).
-  // Safe now that closing a window no longer kills sessions via tmux hooks —
-  // the flag only ever quits the instance it launches.
-  // Optional: CCS_GHOSTTY_HIDDEN=1 runs each spawned instance as an accessory
-  // app — windows stay fully visible and clickable but add no Dock icon or
-  // Cmd-Tab entry. Default is normal Dock presence (one icon per session,
-  // since each window is its own instance).
-  const hidden = process.env.CCS_GHOSTTY_HIDDEN === '1' ? ['--macos-hidden=always'] : []
-  // Strip bridge vars from the environment `open` hands the instance: a window
-  // opened later inside it (Cmd+N, scripts) must not inherit another session's
-  // CCS_TMUX/CCS_FLAGS — that's how one session's channel ended up pasting into
-  // a different session's terminal.
+// Environment for anything handed to `open`: strip bridge and Claude identity
+// vars so windows/shells opened inside spawned instances can't inherit another
+// session's identity (the root of the cross-session routing corruption).
+function sanitizedEnv() {
   const env = { ...process.env }
   for (const k of Object.keys(env)) if (/^(CCS_|CLAUDE|ANTHROPIC_)/.test(k)) delete env[k]
-  await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
-    '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner], { env })
-  log('spawned ghostty', { cwd, args, tmuxName })
+  return env
+}
+
+// ---- single-icon mode (CCS_GHOSTTY_SINGLE=1) --------------------------------
+// One dedicated Ghostty instance hosts ALL bridge windows: its `command` is the
+// ccs-window dispatcher, so every new window (ours via a scripted File→New
+// Window click, or the user's own Cmd+N) pops the next pending session from the
+// spool and attaches to it. One Dock icon, right-click lists every session.
+const SPOOL_DIR = path.join(CONFIG_DIR, 'window-spool')
+
+export async function findBridgeInstance() {
+  try {
+    const out = (await execFile('ps', ['-axo', 'pid=,command='])).stdout
+    for (const line of out.split('\n')) {
+      if (/Ghostty\.app\/Contents\/MacOS\/ghostty/.test(line) && line.includes('bin/ccs-window')) {
+        const pid = Number(line.match(/^\s*(\d+)/)?.[1]) || null
+        if (pid) { try { process.kill(pid, 0); return pid } catch {} } // stale ps rows happen
+      }
+    }
+  } catch {}
+  return null
+}
+
+export async function requestBridgeWindow(tmuxName, title) {
+  fs.mkdirSync(SPOOL_DIR, { recursive: true })
+  const spoolFile = path.join(SPOOL_DIR, `${Date.now()}-${tmuxName}`)
+  fs.writeFileSync(spoolFile, `${tmuxName}\t${title}\n`)
+  const pid = await findBridgeInstance()
+  if (!pid) {
+    // First window: launching the instance consumes the spool entry directly.
+    // NB: no --title here — Ghostty's `title` config PINS every window's title,
+    // which would override the per-session titles the dispatcher sets.
+    await execFile('open', ['-na', 'Ghostty.app', '--args',
+      `--command=${path.join(BRIDGE, 'bin', 'ccs-window')}`,
+      '--quit-after-last-window-closed=true'], { env: sanitizedEnv() })
+    log('bridge ghostty instance launched (single-icon mode)')
+    return true
+  }
+  try {
+    // Subsequent windows: one scripted menu click on the running instance.
+    // Requires Accessibility permission for the daemon's node binary.
+    const script = `tell application "System Events"
+  set p to first application process whose unix id is ${pid}
+  set frontmost of p to true
+  delay 0.2
+  click menu item "New Window" of menu 1 of menu bar item "File" of menu bar 1 of p
+end tell`
+    await execFile('osascript', ['-e', script], { timeout: 10000 })
+    return true
+  } catch (e) {
+    try { fs.unlinkSync(spoolFile) } catch {} // never leave a stale claim behind
+    log('single-icon window click failed (Accessibility?):', String(e?.stderr || e?.message || e).slice(0, 140))
+    return false
+  }
+}
+
+export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
+  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
+  if (process.env.CCS_GHOSTTY_SINGLE === '1') {
+    // Single-icon mode: the daemon owns the tmux session (created detached);
+    // windows are just viewports requested from the one bridge instance. If the
+    // window request fails, the session still runs — a dedicated attach
+    // instance is opened as a fallback (one extra icon, nothing breaks).
+    fs.mkdirSync(cwd, { recursive: true })
+    await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, ccsCmd])
+    log('spawned detached tmux', { cwd, args, tmuxName })
+    if (!(await requestBridgeWindow(tmuxName, title))) {
+      await execFile('open', ['-na', 'Ghostty.app', '--args',
+        '--quit-after-last-window-closed=true', `--title=${title}`,
+        '-e', 'zsh', '-lc', `exec tmux attach-session -t ${tmuxName}`], { env: sanitizedEnv() })
+      log('fell back to dedicated attach instance for', tmuxName)
+    }
+  } else {
+    const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
+    // One Ghostty process per window. --quit-after-last-window-closed makes the
+    // instance exit when its window closes, so ended sessions don't pile up as
+    // windowless instances (enough of those and new windows fail to initialize).
+    // Optional: CCS_GHOSTTY_HIDDEN=1 spawns accessory (dockless) instances.
+    const hidden = process.env.CCS_GHOSTTY_HIDDEN === '1' ? ['--macos-hidden=always'] : []
+    await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
+      '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner], { env: sanitizedEnv() })
+    log('spawned ghostty', { cwd, args, tmuxName })
+  }
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when
     // they actually appear (safer than blind timed Enter presses).

@@ -1,0 +1,28 @@
+#!/bin/bash
+# ccs-window — dispatcher for single-icon mode. The dedicated bridge Ghostty
+# instance runs this in EVERY new window (via Ghostty's `command` option). It
+# pops the next pending session from the spool and becomes its viewport; with
+# nothing pending it's just a plain shell, so manually opened windows (Cmd+N)
+# behave normally.
+SPOOL="${CCS_CONFIG_DIR:-$HOME/.config/ccs}/window-spool"
+command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+if [ -d "$SPOOL" ]; then
+  # Drop stale requests (a window that never materialized shouldn't claim later ones).
+  find "$SPOOL" -type f -mmin +10 -delete 2>/dev/null
+  for f in $(ls -1 "$SPOOL" 2>/dev/null | sort); do
+    case "$f" in *.claimed.*) continue ;; esac
+    src="$SPOOL/$f"
+    claim="$src.claimed.$$"
+    mv "$src" "$claim" 2>/dev/null || continue   # atomic — first window wins
+    IFS=$'\t' read -r TNAME TITLE < "$claim"
+    rm -f "$claim"
+    [ -n "$TNAME" ] || continue
+    if tmux has-session -t "$TNAME" 2>/dev/null; then
+      printf '\033]2;%s\007' "${TITLE:-ccs $TNAME}"
+      exec tmux attach-session -t "$TNAME"
+    fi
+  done
+fi
+printf 'ccs bridge window — nothing pending; plain shell.\n'
+exec "${SHELL:-/bin/zsh}" -l

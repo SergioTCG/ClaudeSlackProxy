@@ -41,7 +41,7 @@ say "Installing dependencies…"
 # ---- 3. link ccs + make scripts executable ----------------------------------
 mkdir -p "$BIN_DIR"
 ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
-chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/hooks/hook.sh" \
+chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/bin/ccs-window" "$BRIDGE/hooks/hook.sh" \
          "$BRIDGE/daemon/daemon.mjs" "$BRIDGE/channel/server.mjs" 2>/dev/null || true
 say "  linked $BIN_DIR/ccs"
 

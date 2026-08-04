@@ -69,6 +69,11 @@ While a turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into a
 
 ## Operations
 
+- **Single Dock icon:** set `CCS_GHOSTTY_SINGLE=1` in `~/.config/ccs/env` and all
+  bridge terminals live under one Ghostty icon (right-click lists every session).
+  Needs a one-time Accessibility grant for the daemon's `node` binary; without it,
+  spawns gracefully fall back to one instance per window. `CCS_GHOSTTY_HIDDEN=1`
+  remains the dockless alternative.
 - **Auto-update:** the daemon checks GitHub at startup and every 6 hours; when a
   new release lands it fast-forwards its clone, refreshes dependencies if needed,
   and restarts itself (sessions keep running — the daemon re-adopts them). It
