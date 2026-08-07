@@ -5,7 +5,8 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/SergioTCG/ClaudeSlackProxy.git"
-BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || pwd)"
+BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd)"
+[ -n "$BRIDGE" ] || BRIDGE="$(pwd)"
 # Piped via curl (or run outside a clone): clone to a standard spot, hand off.
 if [ ! -f "$BRIDGE/daemon/daemon.mjs" ]; then
   DEST="${CCS_HOME:-$HOME/.claudeslackproxy}"

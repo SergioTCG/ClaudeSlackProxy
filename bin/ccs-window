@@ -10,9 +10,8 @@ command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ -d "$SPOOL" ]; then
   # Drop stale requests (a window that never materialized shouldn't claim later ones).
   find "$SPOOL" -type f -mmin +10 -delete 2>/dev/null
-  for f in $(ls -1 "$SPOOL" 2>/dev/null | sort); do
-    case "$f" in *.claimed.*) continue ;; esac
-    src="$SPOOL/$f"
+  while IFS= read -r src; do
+    case "$src" in *.claimed.*) continue ;; esac
     claim="$src.claimed.$$"
     mv "$src" "$claim" 2>/dev/null || continue   # atomic — first window wins
     IFS=$'\t' read -r TNAME TITLE < "$claim"
@@ -22,7 +21,7 @@ if [ -d "$SPOOL" ]; then
       printf '\033]2;%s\007' "${TITLE:-ccs $TNAME}"
       exec tmux attach-session -t "$TNAME"
     fi
-  done
+  done < <(find "$SPOOL" -maxdepth 1 -type f 2>/dev/null | sort)
 fi
 printf 'ccs bridge window — nothing pending; plain shell.\n'
 exec "${SHELL:-/bin/zsh}" -l

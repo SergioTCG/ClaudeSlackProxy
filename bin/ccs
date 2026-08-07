@@ -44,7 +44,8 @@ fi
 # name so the daemon can drive this pane — with CCS_TMUX empty the channel still
 # gets created, but Slack→terminal injection and /cc-stop silently target nothing.
 if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
-  export CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
+  CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
+  export CCS_TMUX
 fi
 
 # Generate the channel MCP config with the resolved server path (no hardcoding).
