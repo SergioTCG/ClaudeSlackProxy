@@ -10,6 +10,7 @@ import {
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle,
+  requestBridgeWindow,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 
@@ -1213,6 +1214,44 @@ http.createServer(async (req, res) => {
       saveState(state)
       log('perm-request', p.request_id, p.tool_name, '→', session.id.slice(0, 8))
     } catch (e) { log('perm-request error', String(e)) }
+    return
+  }
+  // Script-facing spawn API (localhost-only, same trust domain as /hook).
+  // POST /spawn {cwd, flags[]} — launch a bridged session through the daemon so
+  // external scripts (worktree tooling etc.) get the single-icon window path
+  // and flag validation instead of rolling their own `open -na Ghostty`.
+  if (url.pathname === '/spawn' && req.method === 'POST') {
+    let body = ''
+    for await (const c of req) body += c
+    try {
+      const j = JSON.parse(body || '{}')
+      const cwd = path.resolve(String(j.cwd || '').replace(/^~/, process.env.HOME))
+      if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'cwd not allowed or missing' })) }
+      const flags = []
+      for (const f of j.flags || []) {
+        const norm = FLAG_ALIAS[f] || f
+        if (!ALLOWED_FLAGS.has(norm.split('=')[0]) && !/^(fable|opus|sonnet|haiku|low|medium|high|max)$/.test(norm)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: `flag not allowed: ${f}` })) }
+        flags.push(norm)
+      }
+      const tmuxName = `ccs-new-${Date.now().toString(36)}`
+      await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
+      log('spawned via /spawn', cwd, JSON.stringify(flags))
+      res.end(JSON.stringify({ ok: true, tmux: tmuxName }))
+    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
+    return
+  }
+  // POST /window {tmux, title} — request a single-icon viewport for an existing
+  // tmux session (adopt a stray window under the bridge instance).
+  if (url.pathname === '/window' && req.method === 'POST') {
+    let body = ''
+    for await (const c of req) body += c
+    try {
+      const j = JSON.parse(body || '{}')
+      const t = String(j.tmux || '')
+      if (!t || !(await tmuxAlive(t))) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'tmux session not found' })) }
+      const ok = await requestBridgeWindow(t, String(j.title || `ccs ${t}`))
+      res.end(JSON.stringify({ ok }))
+    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
     return
   }
   if (url.pathname === '/channel/stream') {

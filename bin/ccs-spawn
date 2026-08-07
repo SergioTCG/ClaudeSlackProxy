@@ -1,0 +1,19 @@
+#!/bin/bash
+# ccs-spawn — launch a bridged Claude Code session through the daemon.
+#   ccs-spawn <dir> [claude flags...]
+# Scripts should prefer this over rolling their own `open -na Ghostty`: the
+# daemon validates flags, uses the single-icon window path (when enabled), and
+# keeps the environment clean. Exits non-zero if the daemon is unreachable so
+# callers can fall back.
+set -euo pipefail
+DIR="${1:?usage: ccs-spawn <dir> [flags...]}"; shift || true
+command -v node >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+BODY="$(node -e '
+const [dir, ...flags] = process.argv.slice(1)
+process.stdout.write(JSON.stringify({ cwd: dir, flags }))
+' "$DIR" "$@")"
+RESP="$(curl -s -m 15 -X POST http://127.0.0.1:8877/spawn -H 'content-type: application/json' --data-binary "$BODY")" || { echo "ccs-spawn: bridge daemon unreachable" >&2; exit 1; }
+case "$RESP" in
+  '{"ok":true'*) echo "ccs-spawn: session launching ($RESP)";;
+  *) echo "ccs-spawn: $RESP" >&2; exit 1;;
+esac

@@ -4,6 +4,20 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.19] — 2026-08-07
+
+### Added
+- **Script-facing spawn API.** `POST /spawn {cwd, flags}` on the daemon's
+  localhost port launches a bridged session with flag validation, the
+  single-icon window path, and a clean environment — external tooling (e.g.
+  worktree scripts) no longer needs its own `open -na Ghostty`, which bypassed
+  window grouping and could leak environment. `POST /window {tmux, title}`
+  adopts an existing tmux session's viewport under the single icon. New
+  `ccs-spawn <dir> [flags...]` CLI wraps `/spawn` and exits non-zero when the
+  daemon is unreachable so callers can fall back.
+
+[0.2.19]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.19
+
 ## [0.2.18] — 2026-08-04
 
 ### Added
