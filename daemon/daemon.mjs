@@ -231,11 +231,19 @@ function extractQuestionForm(pane) {
     q.unshift(t)
   }
   const question = q.join('\n').trim() || 'Claude asks:'
-  return { question, options: opts, hash: question + '|' + opts.map(o => o.n + o.label).join('|') }
+  const planPath = (pane.match(/(~|\/Users\/[^\s]+)\/\.claude\/plans\/[\w.-]+\.md/) || [])[0] || null
+  return { question, options: opts, planPath, hash: question + '|' + opts.map(o => o.n + o.label).join('|') }
 }
 async function relayQuestionForm(session, form) {
   const prev = qforms.get(session.id)
   if (prev && prev.hash === form.hash) return // unchanged screen
+  if (form.planPath && prev?.planFor !== form.hash) {
+    try {
+      const pf = form.planPath.replace(/^~/, process.env.HOME)
+      const md = fs.readFileSync(pf, 'utf8')
+      await postMd(session.channel, `📋 *Claude's plan* (\`${path.basename(pf)}\`):\n\n${md}`)
+    } catch (e) { log('plan relay failed', String(e?.message || e)) }
+  }
   const blocks = [
     { type: 'section', text: { type: 'mrkdwn', text: `❓ *Claude asks:*\n${escapeText(form.question).slice(0, 2800)}` } },
     { type: 'actions', block_id: `qform_${session.id.slice(0, 8)}`, elements: form.options.slice(0, 10).map(o => ({
@@ -248,7 +256,7 @@ async function relayQuestionForm(session, form) {
     if (ts) await web.chat.update({ channel: session.channel, ts, text: '❓ Claude asks a question', blocks })
     else ts = (await enqueue(session.channel, () => web.chat.postMessage({ channel: session.channel, text: '❓ Claude asks a question', blocks }))).ts
   } catch (e) { log('qform relay error', e?.data?.error || String(e)); return }
-  qforms.set(session.id, { ts, hash: form.hash, options: form.options, at: Date.now() })
+  qforms.set(session.id, { ts, hash: form.hash, options: form.options, at: Date.now(), planFor: form.planPath ? form.hash : prev?.planFor })
   log('qform relayed', session.id.slice(0, 8), JSON.stringify(form.question.slice(0, 60)))
 }
 async function answerQuestionForm(session, n, label) {
@@ -311,6 +319,15 @@ async function finalizeTurn(session) {
   const text = readNewAssistantText(session)
   if (text) await postMd(session.channel, text)
   saveState(state)
+  // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
+  // poller is watching — check once, shortly after, and hand off to a poller.
+  setTimeout(async () => {
+    try {
+      if (!(session.pid && pidAlive(session.pid) && session.tmux && (await tmuxAlive(session.tmux)))) return
+      const form = extractQuestionForm(await tmuxCapture(session.tmux))
+      if (form) { await relayQuestionForm(session, form); startPoller(session) }
+    } catch (e) { log('post-stop form check failed', String(e?.message || e)) }
+  }, 5000)
 }
 
 // Recover live status after a daemon restart. The poller and each status
@@ -329,9 +346,14 @@ async function findStatusMessage(channel) {
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
     if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
-    const spinning = !!extractSpinner(await tmuxCapture(s.tmux))
+    const pane = await tmuxCapture(s.tmux)
+    const spinning = !!extractSpinner(pane)
+    const waitingForm = !spinning && !!extractQuestionForm(pane)
     const ts = await findStatusMessage(s.channel)
-    if (spinning) {
+    if (waitingForm) {
+      startPoller(s) // poller relays the form and manages the answer
+      log('re-adopted session waiting at a question form', s.id.slice(0, 8))
+    } else if (spinning) {
       if (ts) statusTs.set(s.id, ts) // resume editing the existing (frozen) message
       startPoller(s)
       log('re-adopted live turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
@@ -753,7 +775,7 @@ async function handleSlackMessage(channel, text, sender) {
       const o = q.options.find(x => String(x.n) === trimmed)
       if (o) return answerQuestionForm(session, o.n, o.label)
     }
-    const free = q.options.find(o => /type something/i.test(o.label)) || q.options.find(o => /chat about this/i.test(o.label))
+    const free = q.options.find(o => /type something/i.test(o.label)) || q.options.find(o => /chat about this/i.test(o.label)) || q.options.find(o => /tell claude what to change/i.test(o.label))
     if (free) {
       await answerQuestionForm(session, free.n, `${free.label} → “${trimmed.slice(0, 60)}${trimmed.length > 60 ? '…' : ''}”`)
       await sleep(700)

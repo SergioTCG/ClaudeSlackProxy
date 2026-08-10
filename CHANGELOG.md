@@ -4,6 +4,20 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.21] — 2026-08-10
+
+### Fixed
+- **Plan-approval dialogs reach Slack.** Claude Code's "ready to execute —
+  proceed?" dialog renders *after* the turn's Stop hook, when the live-status
+  poller has already shut down — so it was never relayed and the session looked
+  disconnected. The daemon now runs a one-shot form check shortly after every
+  finalize, re-adopts sessions that are waiting at a question form on restart,
+  and relays the **plan file itself** (the dialog names it) into the channel
+  alongside the buttons. Free-text replies route through "Tell Claude what to
+  change" when a plan dialog is open.
+
+[0.2.21]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.21
+
 ## [0.2.20] — 2026-08-10
 
 ### Fixed
