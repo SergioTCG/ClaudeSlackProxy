@@ -4,6 +4,24 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.20] — 2026-08-10
+
+### Fixed
+- **Daemon spawns silently produced nothing after Claude Code's updater removed
+  its old Homebrew shim.** `ccs` resolved `claude` via PATH; the daemon's PATH
+  lacks `~/.local/bin` (the native install's home), so from Aug 8 every
+  daemon-launched session died at exec ("claude: not found") within
+  milliseconds — no channel, no window, no error. `ccs` now falls back to
+  `~/.local/bin` when `claude` isn't on PATH, and the installer's LaunchAgent
+  PATH includes it.
+- **Detached spawns are now babysat.** The daemon verifies claude reaches its
+  prompt before requesting the window (no more mid-boot attach races), captures
+  the dying session's last screen into the log when a boot fails (forensics),
+  retries once, and — crucially — **fails loudly** through `/spawn`/`ccs-spawn`
+  instead of pretending success, so calling scripts can fall back.
+
+[0.2.20]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.20
+
 ## [0.2.19] — 2026-08-07
 
 ### Added

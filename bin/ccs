@@ -13,9 +13,13 @@ while [ -h "$SOURCE" ]; do
 done
 BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
-# Bare login shells (scripts, Ghostty -e) may lack Homebrew on PATH — without
-# tmux findable, the self-wrap silently degrades to an undrivable session.
+# Bare login shells (scripts, Ghostty -e) and daemon-created tmux sessions may
+# lack Homebrew or ~/.local/bin on PATH — without tmux the self-wrap silently
+# degrades, and without claude (native install lives in ~/.local/bin) the exec
+# fails outright ("claude: not found" killed every daemon spawn after claude's
+# updater removed its old /opt/homebrew shim).
 command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
 export CCS_BRIDGE=1
 export CCS_FLAGS="$*"   # launch flags, so the daemon can replay them on resume
 # Never trust an inherited CCS_TMUX: env leaks (open/Ghostty windows spawned

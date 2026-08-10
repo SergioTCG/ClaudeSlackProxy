@@ -284,18 +284,42 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) 
   const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   if (process.env.CCS_GHOSTTY_SINGLE === '1') {
     // Single-icon mode: the daemon owns the tmux session (created detached);
-    // windows are just viewports requested from the one bridge instance. If the
-    // window request fails, the session still runs — a dedicated attach
-    // instance is opened as a fallback (one extra icon, nothing breaks).
+    // windows are just viewports requested from the one bridge instance.
+    // Detached boots have died mid-startup on rare races (consent dialogs /
+    // claude self-relaunch), silently producing nothing — so babysit the boot:
+    // verify claude reaches its prompt, capture the last screen if the tmux
+    // dies (forensics for the next occurrence), and retry once. The viewport is
+    // requested only after claude is ready, removing mid-boot attach races.
     fs.mkdirSync(cwd, { recursive: true })
-    await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, ccsCmd])
-    log('spawned detached tmux', { cwd, args, tmuxName })
+    let ready = false
+    for (let attempt = 1; attempt <= 2 && !ready; attempt++) {
+      await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, ccsCmd])
+      log('spawned detached tmux', { cwd, args, tmuxName, attempt })
+      if (autoConsent) {
+        const c = spawn(path.join(BRIDGE, 'bin', 'ccs-consent'), [tmuxName], { detached: true, stdio: 'ignore' })
+        c.unref()
+      }
+      let lastPane = ''
+      for (let i = 0; i < 60 && !ready; i++) {
+        await sleep(500)
+        if (!(await tmuxAlive(tmuxName))) {
+          log(`boot died (attempt ${attempt}); last screen:`, JSON.stringify(lastPane.split('\n').filter(Boolean).slice(-6).join(' | ').slice(0, 400)))
+          break
+        }
+        const pane = await tmuxCapture(tmuxName)
+        if (pane.trim()) lastPane = pane
+        if (/bypass permissions|shift\+tab to cycle/.test(pane)) ready = true
+      }
+      if (!ready && (await tmuxAlive(tmuxName))) { ready = true; log('boot verification timed out but tmux alive — proceeding', tmuxName) }
+    }
+    if (!ready) throw new Error(`spawn failed twice for ${tmuxName} — see daemon log for last screen`)
     if (!(await requestBridgeWindow(tmuxName, title))) {
       await execFile('open', ['-na', 'Ghostty.app', '--args',
         '--quit-after-last-window-closed=true', `--title=${title}`,
         '-e', 'zsh', '-lc', `exec tmux attach-session -t ${tmuxName}`], { env: sanitizedEnv() })
       log('fell back to dedicated attach instance for', tmuxName)
     }
+    if (autoConsent) return // consent watcher already launched per attempt
   } else {
     const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
     // One Ghostty process per window. --quit-after-last-window-closed makes the
