@@ -43,7 +43,8 @@ say "Installing dependencies…"
 mkdir -p "$BIN_DIR"
 ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
 ln -sf "$BRIDGE/bin/ccs-spawn" "$BIN_DIR/ccs-spawn"
-chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/bin/ccs-window" "$BRIDGE/bin/ccs-spawn" "$BRIDGE/hooks/hook.sh" \
+ln -sf "$BRIDGE/bin/ccs-account" "$BIN_DIR/ccs-account"
+chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/bin/ccs-window" "$BRIDGE/bin/ccs-spawn" "$BRIDGE/bin/ccs-account" "$BRIDGE/hooks/hook.sh" \
          "$BRIDGE/daemon/daemon.mjs" "$BRIDGE/channel/server.mjs" 2>/dev/null || true
 say "  linked $BIN_DIR/ccs"
 

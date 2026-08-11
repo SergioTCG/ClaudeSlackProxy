@@ -4,6 +4,45 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.22] — 2026-08-11
+
+### Added
+- **Per-session Claude subscriptions.** A session can run under a named Claude
+  account, so collaborative work bills to whoever owns that session instead of
+  everyone sharing one subscription. Manage accounts on the Mac with
+  **`ccs-account`** (`add` mints a token via `claude setup-token` in a throwaway
+  config dir, so the sign-in never disturbs the machine's own login; `set` takes
+  a token minted elsewhere; `list` masks them). Bind and switch from Slack with
+  **`/cc-account [name | default]`** — switching restarts the session and
+  resumes the same conversation. `/cc-new` and the spawn API accept
+  `--account <name>` / `{account}`, and a session's binding survives resume.
+  Requires reinstalling the app manifest to register the new slash command.
+
+  **Secrets never travel where they could leak**: tokens live only in
+  `~/.config/ccs/accounts` (0600) and are resolved inside `ccs` at launch — the
+  command line carries just the account *name*, since `ps` shows every
+  process's argv to every user on the machine. Names are strictly validated
+  (`[A-Za-z0-9_-]`) before they reach a shell, and tokens never enter
+  `state.json`, the daemon log, channel topics, or window titles.
+
+### Fixed
+- **A stray hook could hijack a live session and orphan its channel.** The
+  identity-refresh path (which legitimately rebrands a record when `/clear`
+  gives the same process a new session id) matched purely on the resolved pid,
+  so *any* hook whose ppid happened to resolve to a running session's claude
+  took that session's record and channel with it. The channel then had no owner,
+  the session went silent, and the next hook minted a **duplicate channel** for
+  a terminal that already had one. Takeover now requires the payload's own
+  transcript to belong to the new session id **and** the same terminal;
+  mismatches are logged and ignored.
+- **Lost bindings reclaim their channel instead of creating a duplicate.** The
+  daemon remembers which terminal owns each channel, so a session whose binding
+  disappeared (state edited underneath it, a botched migration, a manual repair)
+  re-attaches to its existing channel and posts "Reconnected" rather than
+  starting a fresh one.
+
+[0.2.22]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.22
+
 ## [0.2.21] — 2026-08-10
 
 ### Fixed

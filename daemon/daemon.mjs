@@ -9,7 +9,7 @@ import {
   BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState,
   resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
-  ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle,
+  ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle, safeAccount,
   requestBridgeWindow,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
@@ -21,6 +21,7 @@ const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
+if (!state.channelTmux) state.channelTmux = {} // channel → tmux name last seen owning it (rebinding aid)
 const BOOT_TS = Date.now()
 
 // Safety net: a single Slack API error (e.g. posting to an archived channel from
@@ -111,6 +112,23 @@ async function postMd(channel, md) {
 
 async function ensureChannel(session) {
   if (session.channel) return session.channel
+  // A binding can be lost (state edited out from under the daemon, a botched
+  // migration, a manual repair). Before minting a duplicate channel for a
+  // terminal that already has one, reclaim it — a terminal maps to one channel.
+  const prior = session.tmux && Object.entries(state.channelTmux).find(([, t]) => t === session.tmux)?.[0]
+  if (prior && !sessionByChannel(prior)) {
+    try {
+      const info = await web.conversations.info({ channel: prior })
+      if (!info.channel?.is_archived) {
+        session.channel = prior
+        state.channels[prior] = session.id
+        saveState(state)
+        log('reclaimed channel', prior, 'for', session.id.slice(0, 8), 'via terminal', session.tmux)
+        await post(prior, '🔄 *Reconnected* — this channel is bound to the session again.')
+        return prior
+      }
+    } catch (e) { log('channel reclaim check failed', e?.data?.error || String(e)) }
+  }
   const { repo, branch, worktree } = await gitInfo(session.cwd)
   const name = channelName(repo, branch, worktree)
   let created
@@ -446,7 +464,7 @@ async function validTmuxClaim(pid, tname) {
   return ok
 }
 
-async function onHook(body, ppid, tmux, flags) {
+async function onHook(body, ppid, tmux, flags, account) {
   const ev = body.hook_event_name
   const pid = await resolveClaudePid(ppid)
   if (!pid) return
@@ -476,8 +494,19 @@ async function onHook(body, ppid, tmux, flags) {
     session = { id: sid, pid, cwd: body.cwd, tmux, transcript: body.transcript_path, offset: tail, channel: null, statusTs: null }
     state.sessions[sid] = session
   }
-  // keep identity fresh (handles /clear: new sid, same pid)
+  // Keep identity fresh (handles /clear: same pid, new sid). This path REBRANDS an
+  // existing session record, so it must not be reachable by a stray hook: a payload
+  // whose pid merely resolves to some live claude could otherwise steal that
+  // session's channel and orphan it. Require the payload's own transcript to belong
+  // to the new id, and require the same terminal.
   if (session.id !== sid) {
+    const transcriptMatches = !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
+    const sameTerminal = !tmux || !session.tmux || tmux === session.tmux
+    if (!transcriptMatches || !sameTerminal) {
+      log('rejected identity takeover of', session.id.slice(0, 8), 'by', String(sid).slice(0, 8),
+        `(transcript=${transcriptMatches}, sameTerminal=${sameTerminal})`)
+      return
+    }
     delete state.sessions[session.id]
     if (session.channel) state.channels[session.channel] = sid
     session.id = sid
@@ -486,11 +515,14 @@ async function onHook(body, ppid, tmux, flags) {
   }
   session.pid = pid
   session.tmux = tmux || session.tmux
+  if (session.channel && session.tmux) state.channelTmux[session.channel] = session.tmux
   // Heal stored claims too (a poisoned name may have been recorded before the guard).
   if (session.tmux && !tmux && !(await validTmuxClaim(pid, session.tmux))) session.tmux = null
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
   if (flags != null && flags !== '') session.launchFlags = flags
+  const acct = safeAccount(account)
+  if (acct && session.account !== acct) session.account = acct // which subscription pays for this session
   saveState(state)
 
   if (ev === 'SessionStart') {
@@ -691,6 +723,7 @@ async function resurrect(session, text) {
         title: `ccs ${path.basename(session.cwd)} (resumed)`,
         tmuxName,
         autoConsent: true,
+        account: session.account, // keep paying from the same subscription
       })
       for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
       if (up) return // SessionStart clears the in-flight guard and flushes the queue
@@ -878,6 +911,15 @@ function readModel(session) {
 async function spawnNew(channel, dir, extraFlags) {
   const cwd = path.resolve(dir.replace(/^~/, process.env.HOME))
   if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
+  // `--account <name>` picks the subscription; it is bridge config, not a claude flag.
+  let account = null
+  const ai = extraFlags.indexOf('--account')
+  if (ai >= 0) {
+    account = safeAccount(extraFlags[ai + 1])
+    if (!account) return post(channel, `❌ Invalid account name after \`--account\`.`)
+    if (!listAccounts().includes(account)) return post(channel, `❌ Unknown account \`${account}\`.`)
+    extraFlags = extraFlags.filter((_, i) => i !== ai && i !== ai + 1)
+  }
   const flags = []
   for (const f of extraFlags) {
     const norm = FLAG_ALIAS[f] || f
@@ -885,9 +927,9 @@ async function spawnNew(channel, dir, extraFlags) {
     else return post(channel, `❌ Flag not allowed: \`${f}\``)
   }
   const tmuxName = `ccs-new-${Date.now().toString(36)}`
-  await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`…`)
+  await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
   await reapGhosttyZombies() // windowless-instance pileup breaks new windows
-  await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
+  await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true, account })
   let up = false
   for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
   if (!up) await post(channel, '⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try `/cc-new` again.')
@@ -1048,6 +1090,32 @@ async function usageReport(channel) {
     `| All time | ${fmtTok(t.totalTokens)} | ${fmtUsd(t.totalCost)} |` + limitFooter())
 }
 
+// ---- per-session subscriptions ----------------------------------------------
+// A session can run under a named Claude account (see bin/ccs-account), so each
+// person's work bills to their own subscription. The daemon only ever handles
+// NAMES — tokens live in ~/.config/ccs/accounts (0600) and are resolved inside
+// `ccs` at launch, never passed through argv, state, or Slack.
+function listAccounts() {
+  try {
+    return fs.readFileSync(path.join(CONFIG_DIR, 'accounts'), 'utf8')
+      .split('\n').map(l => l.split('=')[0].trim()).filter(n => safeAccount(n))
+  } catch { return [] }
+}
+async function switchAccount(session, name) {
+  const label = name ? `\`${name}\`` : "this machine's own login"
+  await post(session.channel, `🔐 *Switching subscription* → ${label}. Restarting and resuming this conversation…`)
+  restarting.add(session.id)
+  if (session.tmux) await tmuxKill(session.tmux)
+  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  stopPoller(session); await clearStatus(session)
+  session.pid = null
+  session.account = name || null
+  saveState(state)
+  await sleep(1500)
+  await resurrect(session)
+  setTimeout(() => restarting.delete(session.id), 60000)
+}
+
 // Command dispatch for the native /cc-* slash commands.
 async function dispatch(name, rest, channel) {
   if (name === 'help') {
@@ -1056,6 +1124,7 @@ async function dispatch(name, rest, channel) {
       '`/cc-new [folder] [--dsp] [--chrome]` — start a session (no arg = pick a project)\n' +
       '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg lists available models with versions)\n' +
       '`/cc-update` — update Claude Code & restart this session with the same flags\n' +
+      '`/cc-account [name]` — which Claude subscription pays for this session (restarts & resumes)\n' +
       '`/cc-stop` — interrupt the running turn\n' +
       '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
       '`/cc-usage [days [n] | models | limits]` — usage: project here / aggregate in control; `days` = per-day sheet, `models` = per-model, `limits` = plan limits (5h/weekly %)\n' +
@@ -1165,6 +1234,22 @@ async function dispatch(name, rest, channel) {
       return await usageReport(channel)
     } catch (e) { log('usage error', String(e)); return post(channel, `⚠️ ccusage failed: ${String(e?.message || e).slice(0, 200)}`) }
   }
+  if (name === 'account') {
+    const session = sessionByChannel(channel)
+    const available = listAccounts()
+    const known = available.length ? available.map(a => `\`${a}\``).join(' · ') : '_none yet — add one on the Mac with_ `ccs-account add <name>`'
+    if (!session) return post(channel, `*Subscriptions available:* ${known}\nRun \`/cc-account <name>\` in a session channel to bind that session to an account.`)
+    const cur = session.account ? `\`${session.account}\`` : "this machine's own Claude login (default)"
+    if (!rest.length) {
+      return post(channel, `*Subscription for this session:* ${cur}\n*Available:* ${known}\nSwitch with \`/cc-account <name>\` (or \`/cc-account default\`). The session restarts and resumes — the conversation is kept.`)
+    }
+    const want = rest[0].toLowerCase()
+    if (want === 'default' || want === 'none') return switchAccount(session, null)
+    const picked = safeAccount(rest[0])
+    if (!picked || !available.includes(picked)) return post(channel, `❌ Unknown account \`${rest[0]}\`. *Available:* ${known}`)
+    if (picked === session.account) return post(channel, `Already running under \`${picked}\`.`)
+    return switchAccount(session, picked)
+  }
   if (name === 'update' || name === 'restart') {
     const session = sessionByChannel(channel)
     if (!session) return post(channel, 'Use `/cc-update` in a session channel — it updates Claude Code and restarts the session with the same flags.')
@@ -1184,7 +1269,7 @@ http.createServer(async (req, res) => {
     let body = ''
     for await (const c of req) body += c
     res.end('ok')
-    try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'), req.headers['x-ccs-flags']) }
+    try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'), req.headers['x-ccs-flags'], req.headers['x-ccs-account']) }
     catch (e) { log('hook error', String(e)) }
     return
   }
@@ -1255,9 +1340,11 @@ http.createServer(async (req, res) => {
         if (!ALLOWED_FLAGS.has(norm.split('=')[0]) && !/^(fable|opus|sonnet|haiku|low|medium|high|max)$/.test(norm)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: `flag not allowed: ${f}` })) }
         flags.push(norm)
       }
+      const account = j.account ? safeAccount(j.account) : null
+      if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
       const tmuxName = `ccs-new-${Date.now().toString(36)}`
-      await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true })
-      log('spawned via /spawn', cwd, JSON.stringify(flags))
+      await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true, account })
+      log('spawned via /spawn', cwd, JSON.stringify(flags), account ? `account=${account}` : '')
       res.end(JSON.stringify({ ok: true, tmux: tmuxName }))
     } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
     return

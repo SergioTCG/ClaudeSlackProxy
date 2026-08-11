@@ -280,8 +280,15 @@ end tell`
   }
 }
 
-export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent }) {
-  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
+// Account names are interpolated into a shell command, so they are strictly
+// validated here as well as at the CLI — never trust a stored value blindly.
+export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(a) ? a : null)
+
+export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, account }) {
+  const acct = safeAccount(account)
+  // Only the NAME travels in the command line (ps is world-readable); `ccs`
+  // resolves it to the token from the 0600 accounts file.
+  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
   if (process.env.CCS_GHOSTTY_SINGLE === '1') {
     // Single-icon mode: the daemon owns the tmux session (created detached);
     // windows are just viewports requested from the one bridge instance.

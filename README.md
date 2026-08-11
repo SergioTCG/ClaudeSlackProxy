@@ -55,6 +55,7 @@ Commands are native Slack slash commands — type `/cc-` and Slack autocompletes
 | `/cc-new [folder] [--dsp] [--chrome]` | start a session — no argument shows a project picker (dirs under `$HOME`) |
 | `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it — `/cc-model` with no arg lists available models with their real versions (read from the `claude` binary) |
 | `/cc-update` | update Claude Code (`claude update`) and restart this session with the same flags, resuming the conversation — how you pick up a new CLI build or a newly released model |
+| `/cc-account [name]` | which Claude subscription pays for this session (see [Per-session subscriptions](#per-session-subscriptions)); switching restarts and resumes |
 | `/cc-status` | session info + manage collaborators here, or all sessions from the control channel |
 | `/cc-usage [days [n] \| models \| limits]` | token & cost usage ([ccusage](https://github.com/ryoppippi/ccusage), bundled) — project here / aggregate in control; `days` = per-day sheet (models, in/out, cache w/r), `models` = per-model totals, `limits` = live plan limits (5h session %, weekly %, reset times — same numbers as claude.ai/settings/usage) |
 | `/cc-health` | bridge status |
@@ -66,6 +67,28 @@ Commands are native Slack slash commands — type `/cc-` and Slack autocompletes
 **Collaborators.** From `/cc-status` in a session channel, a user-picker lets you allow specific Slack teammates to send prompts to that session (a Remove button revokes them; the current list is shown). Their prompts are injected labelled `[Slack collaborator <name>]`, so the transcript records who said what. Collaborators can send prompts only — not permission verdicts, `/cc-*` commands, or session resurrection — and only while the session is live. Everything else stays owner-only, and the whitelist is per channel and survives restarts.
 
 While a turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into an edit-in-place status message, and the channel topic tracks `folder · branch · model · effort`. Responses over ~6,000 chars upload as a `response.md` file. Consent dialogs are auto-dismissed. Sessions never archive on their own — a dormant channel says "write here to resume," and doing so spawns a Ghostty window and continues where you left off.
+
+## Per-session subscriptions
+
+By default every session runs under the Mac's own Claude login. When you invite
+collaborators, you can instead bind a session to **its owner's** subscription, so
+each person's usage bills to their own account:
+
+```bash
+ccs-account add tina        # sign in as that person → mints a long-lived token
+ccs-account list            # names, tokens masked
+```
+
+Then in the session's channel: `/cc-account tina` (restarts and resumes the same
+conversation), or start one bound from the outset with
+`/cc-new <folder> --account tina`. `/cc-account default` reverts to the machine's
+own login. Bindings survive resume and daemon restarts.
+
+Tokens live only in `~/.config/ccs/accounts` (mode 0600) and are resolved inside
+`ccs` at launch — the command line carries only the account name, because `ps`
+exposes argv to every user on the machine. A long-lived token is a bearer
+credential for that subscription: treat the file like a password store, and note
+that whoever administers the Mac necessarily holds it.
 
 ## Operations
 

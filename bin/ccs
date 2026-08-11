@@ -41,7 +41,7 @@ if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; t
   # Auto-dismiss the trust / dev-channels dialogs so the session comes up clean.
   "$BRIDGE/bin/ccs-consent" "$TN" >/dev/null 2>&1 &
   exec tmux new-session -s "$TN" \
-    "CCS_BRIDGE=1 CCS_TMUX=$TN $(printf '%q' "$SOURCE") $q"
+    "CCS_BRIDGE=1 CCS_TMUX=$TN${CCS_ACCOUNT:+ CCS_ACCOUNT=$CCS_ACCOUNT} $(printf '%q' "$SOURCE") $q"
 fi
 
 # Running inside an existing tmux session (no self-wrap): derive the session
@@ -50,6 +50,20 @@ fi
 if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
   CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
   export CCS_TMUX
+fi
+
+# Per-session subscription: CCS_ACCOUNT names an entry in the 0600 accounts file
+# (see bin/ccs-account). Resolve it to a token HERE — never on the command line,
+# because `ps` shows every process's argv to every user on the machine. An
+# explicit CLAUDE_CODE_OAUTH_TOKEN in the environment always wins.
+if [ -n "${CCS_ACCOUNT:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  _acct_tok="$(grep -m1 "^${CCS_ACCOUNT}=" "$CONFIG_DIR/accounts" 2>/dev/null | cut -d= -f2-)"
+  if [ -n "$_acct_tok" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$_acct_tok"
+  else
+    echo "ccs: unknown account '$CCS_ACCOUNT' — falling back to this machine's Claude login" >&2
+  fi
+  unset _acct_tok
 fi
 
 # Generate the channel MCP config with the resolved server path (no hardcoding).
