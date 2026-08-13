@@ -920,6 +920,7 @@ async function spawnNew(channel, dir, extraFlags) {
     if (!listAccounts().includes(account)) return post(channel, `❌ Unknown account \`${account}\`.`)
     extraFlags = extraFlags.filter((_, i) => i !== ai && i !== ai + 1)
   }
+  if (!extraFlags.length) extraFlags = defaultNewFlags() // a bare /cc-new must not yield a flagless session
   const flags = []
   for (const f of extraFlags) {
     const norm = FLAG_ALIAS[f] || f
@@ -1116,6 +1117,41 @@ async function switchAccount(session, name) {
   setTimeout(() => restarting.delete(session.id), 60000)
 }
 
+// Launch flags a session was started with, minus the resume plumbing (which the
+// daemon re-adds itself) — i.e. what the user actually chose.
+function displayFlags(session) {
+  const toks = (session.launchFlags || '').trim().split(/\s+/).filter(Boolean)
+  const out = []
+  for (let i = 0; i < toks.length; i++) {
+    if (toks[i] === '--resume' || toks[i] === '-r') { i++; continue }
+    if (toks[i] === '--continue' || toks[i] === '-c') continue
+    out.push(toks[i])
+  }
+  return out
+}
+
+// Change a live session's launch flags. Claude Code reads them at startup, so
+// this restarts the session and resumes the same conversation — the same dance
+// as /cc-account and /cc-update.
+async function setFlags(session, flags) {
+  await post(session.channel, `🔧 *Setting launch flags* → \`${flags.join(' ') || '(none)'}\`. Restarting and resuming this conversation…`)
+  restarting.add(session.id)
+  if (session.tmux) await tmuxKill(session.tmux)
+  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  stopPoller(session); await clearStatus(session)
+  session.pid = null
+  session.launchFlags = flags.join(' ')
+  saveState(state)
+  await sleep(1500)
+  await resurrect(session)
+  setTimeout(() => restarting.delete(session.id), 60000)
+}
+
+// Flags a /cc-new session gets when none are given. Configurable because the
+// right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
+const defaultNewFlags = () =>
+  (process.env.CCS_NEW_FLAGS || '--dangerously-skip-permissions').split(/\s+/).filter(Boolean)
+
 // Command dispatch for the native /cc-* slash commands.
 async function dispatch(name, rest, channel) {
   if (name === 'help') {
@@ -1125,6 +1161,7 @@ async function dispatch(name, rest, channel) {
       '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg lists available models with versions)\n' +
       '`/cc-update` — update Claude Code & restart this session with the same flags\n' +
       '`/cc-account [name]` — which Claude subscription pays for this session (restarts & resumes)\n' +
+      '`/cc-flags [--dsp --chrome …]` — show or change this session\'s launch flags (restarts & resumes)\n' +
       '`/cc-stop` — interrupt the running turn\n' +
       '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
       '`/cc-usage [days [n] | models | limits]` — usage: project here / aggregate in control; `days` = per-day sheet, `models` = per-model, `limits` = plan limits (5h/weekly %)\n' +
@@ -1268,6 +1305,23 @@ async function dispatch(name, rest, channel) {
     const session = sessionByChannel(channel)
     if (!session) return post(channel, 'Use `/cc-update` in a session channel — it updates Claude Code and restarts the session with the same flags.')
     return updateAndRestart(session)
+  }
+  if (name === 'flags') {
+    const session = sessionByChannel(channel)
+    if (!session) return post(channel, 'Use `/cc-flags` in a session channel.')
+    const allowed = [...ALLOWED_FLAGS].map(f => `\`${f}\``).join(' · ') + ' (`--dsp` works too)'
+    if (!rest.length) {
+      const cur = displayFlags(session)
+      return post(channel, `*Launch flags:* ${cur.length ? '\`' + cur.join(' ') + '\`' : '_none_'}\n` +
+        `Set with \`/cc-flags --dsp --chrome\` — the session restarts and resumes this conversation.\n*Allowed:* ${allowed}`)
+    }
+    const flags = []
+    for (const f of rest) {
+      const norm = FLAG_ALIAS[f] || f
+      if (!ALLOWED_FLAGS.has(norm.split('=')[0])) return post(channel, `❌ Flag not allowed: \`${f}\`\n*Allowed:* ${allowed}`)
+      if (!flags.includes(norm)) flags.push(norm)
+    }
+    return setFlags(session, flags)
   }
   if (name === 'new') {
     if (!rest.length) return postFolderPicker(channel)
@@ -1474,7 +1528,7 @@ sm.on('interactive', async ({ body, ack }) => {
     if (!action) return
     if (action.action_id === 'ccnew_folder') {
       const folder = action.selected_option?.value
-      if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), ['--dangerously-skip-permissions'])
+      if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), defaultNewFlags())
       return
     }
     if (action.action_id === 'collab_add') {

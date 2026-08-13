@@ -4,6 +4,24 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.24] — 2026-08-13
+
+### Added
+- **`/cc-flags` — change a session's launch flags without losing it.** Shows the
+  current flags with no argument; `/cc-flags --dsp --chrome` sets them, restarts
+  the session and resumes the same conversation (Claude Code reads these at
+  startup, so a restart is unavoidable — it's the same dance as `/cc-account`).
+  Validated against the existing allowlist, deduped, and persisted so resumes
+  keep them. Requires reinstalling the app manifest.
+- **`/cc-new` no longer spawns flagless sessions.** With no flags given it used
+  to launch a bare `claude` — no `--dangerously-skip-permissions`, so the session
+  prompted for every tool and had no way to be corrected from Slack. It now
+  applies a configurable default (`CCS_NEW_FLAGS`, default
+  `--dangerously-skip-permissions`); explicit flags still replace it entirely.
+  The project picker uses the same default.
+
+[0.2.24]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.24
+
 ## [0.2.23] — 2026-08-13
 
 ### Added
