@@ -93,11 +93,14 @@ that whoever administers the Mac necessarily holds it.
 
 ## Operations
 
-- **Single Dock icon:** set `CCS_GHOSTTY_SINGLE=1` in `~/.config/ccs/env` and all
-  bridge terminals live under one Ghostty icon (right-click lists every session).
-  Needs a one-time Accessibility grant for the daemon's `node` binary; without it,
-  spawns gracefully fall back to one instance per window. `CCS_GHOSTTY_HIDDEN=1`
-  remains the dockless alternative.
+- **Dock clutter:** each session's window is its own Ghostty instance (macOS
+  Ghostty has no IPC to open windows in a running one), so by default each adds a
+  Dock icon. Set `CCS_GHOSTTY_HIDDEN=1` in `~/.config/ccs/env` to run them as
+  accessory windows instead — fully visible and titled with the channel topic,
+  but **no Dock icons at all**; reach them via Mission Control or `tmux attach`.
+  (`CCS_GHOSTTY_SINGLE=1` aimed to put every window under one shared icon via UI
+  scripting; current Ghostty ignores programmatic window creation, so it degrades
+  to one instance per session after a restart — see the 0.2.25 changelog.)
 - **Auto-update:** the daemon checks GitHub at startup and every 6 hours; when a
   new release lands it fast-forwards its clone, refreshes dependencies if needed,
   and restarts itself (sessions keep running — the daemon re-adopts them). It

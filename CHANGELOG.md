@@ -4,6 +4,32 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.25] — 2026-08-13
+
+### Fixed
+- **Window titles stopped mirroring the channel topic.** Ghostty's `title`
+  config *pins* a window's title and ignores the escape sequences tmux uses, so
+  passing `--title` at spawn silently disabled topic mirroring (windows showed
+  the working directory instead). The spawner no longer sets a title at all —
+  tmux owns it, and `updateTopic` keeps it in sync with Slack.
+- **A windowless bridge instance silently swallowed every window request.** In
+  single-icon mode, File → New Window on an instance with zero windows
+  "succeeds" (AppleScript even returns the menu item) while opening nothing, so
+  sessions stayed windowless with no error. Such instances are now detected and
+  reaped, and the caller relaunches an instance instead.
+
+### Known limitation
+- **Single-icon mode (`CCS_GHOSTTY_SINGLE=1`) no longer works reliably.**
+  Creating a window in a *running* Ghostty needs UI scripting (macOS has no
+  Ghostty IPC — `+new-window` is Linux-only), and current Ghostty ignores both
+  the File → New Window menu click and ⌘N even with the app frontmost, the menu
+  item enabled, and Accessibility granted. It can open the first window (via
+  instance launch) and nothing after, so a machine restart degrades it to one
+  instance per session. Prefer `CCS_GHOSTTY_HIDDEN=1` (accessory windows, no
+  Dock icons at all) or the default one-icon-per-session.
+
+[0.2.25]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.25
+
 ## [0.2.24] — 2026-08-13
 
 ### Added

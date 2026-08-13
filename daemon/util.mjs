@@ -238,17 +238,39 @@ function sanitizedEnv() {
 // spool and attaches to it. One Dock icon, right-click lists every session.
 const SPOOL_DIR = path.join(CONFIG_DIR, 'window-spool')
 
+// How many windows an instance currently has. -1 when it can't be determined
+// (no Accessibility permission etc.), which callers treat as "assume usable".
+async function instanceWindowCount(pid) {
+  try {
+    const { stdout } = await execFile('osascript', ['-e',
+      `tell application "System Events" to count windows of (first application process whose unix id is ${pid})`],
+      { timeout: 8000 })
+    const n = Number(String(stdout).trim())
+    return Number.isFinite(n) ? n : -1
+  } catch { return -1 }
+}
+
 export async function findBridgeInstance() {
+  let pid = null
   try {
     const out = (await execFile('ps', ['-axo', 'pid=,command='])).stdout
     for (const line of out.split('\n')) {
       if (/Ghostty\.app\/Contents\/MacOS\/ghostty/.test(line) && line.includes('bin/ccs-window')) {
-        const pid = Number(line.match(/^\s*(\d+)/)?.[1]) || null
-        if (pid) { try { process.kill(pid, 0); return pid } catch {} } // stale ps rows happen
+        const p = Number(line.match(/^\s*(\d+)/)?.[1]) || null
+        if (p) { try { process.kill(p, 0); pid = p; break } catch {} } // stale ps rows happen
       }
     }
   } catch {}
-  return null
+  if (!pid) return null
+  // A windowless instance cannot be driven: File → New Window "succeeds" (the
+  // script even returns the menu item) but nothing opens, so every request
+  // silently no-ops. Reap it and report absent, so the caller relaunches an
+  // instance — which opens a window and consumes the spool immediately.
+  if ((await instanceWindowCount(pid)) === 0) {
+    try { process.kill(pid); log('reaped windowless bridge instance', pid) } catch {}
+    return null
+  }
+  return pid
 }
 
 export async function requestBridgeWindow(tmuxName, title) {
@@ -335,7 +357,7 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
     if (!ready) throw new Error(`spawn failed twice for ${tmuxName} — see daemon log for last screen`)
     if (!(await requestBridgeWindow(tmuxName, title))) {
       await execFile('open', ['-na', 'Ghostty.app', '--args',
-        '--quit-after-last-window-closed=true', `--title=${title}`,
+        '--quit-after-last-window-closed=true',
         '-e', 'zsh', '-lc', `exec tmux attach-session -t ${tmuxName}`], { env: sanitizedEnv() })
       log('fell back to dedicated attach instance for', tmuxName)
     }
@@ -347,8 +369,11 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
     // windowless instances (enough of those and new windows fail to initialize).
     // Optional: CCS_GHOSTTY_HIDDEN=1 spawns accessory (dockless) instances.
     const hidden = process.env.CCS_GHOSTTY_HIDDEN === '1' ? ['--macos-hidden=always'] : []
+    // No --title here on purpose: Ghostty's `title` config PINS the window title
+    // and ignores the escape sequences tmux sends, which is how the window title
+    // mirrors the Slack channel topic (see tmuxTitle/updateTopic).
     await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
-      '--quit-after-last-window-closed=true', `--title=${title}`, '-e', 'zsh', '-lc', inner], { env: sanitizedEnv() })
+      '--quit-after-last-window-closed=true', '-e', 'zsh', '-lc', inner], { env: sanitizedEnv() })
     log('spawned ghostty', { cwd, args, tmuxName })
   }
   if (autoConsent) {
