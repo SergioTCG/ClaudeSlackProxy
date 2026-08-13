@@ -26,5 +26,15 @@ if [ -d "$SPOOL" ]; then
     fi
   done
 fi
+# Nothing pending. Before falling back to a plain shell, adopt a live bridged
+# session that has no window — after a reboot macOS restores these windows with
+# an empty spool, and a session left running headless looks "dead" in Slack.
+# (No pipe/heredoc into this: the exec'd `tmux attach` needs the tty as stdin.)
+orphan="$(tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null | awk '$2 == 0 && $1 ~ /^ccs-/ { print $1; exit }')"
+if [ -n "$orphan" ]; then
+  printf '\033]2;ccs %s\007' "$orphan"
+  exec tmux attach-session -t "$orphan"
+fi
+
 printf 'ccs bridge window — nothing pending; plain shell.\n'
 exec "${SHELL:-/bin/zsh}" -l

@@ -1205,14 +1205,28 @@ async function dispatch(name, rest, channel) {
         const models = await getModels()
         if (models.length) {
           const rows = models.map(m => `| \`${m.alias}\` | ${m.name} | \`${m.id}\` |`).join('\n')
-          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`/cc-model <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}`)
+          const hasLong = models.some(m => /-1m$/.test(m.alias))
+          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`/cc-model <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}` +
+            (hasLong ? '\n_A family alias picks the *1M-context* variant when one exists — pass the full id for the standard window._' : ''))
         }
         return post(channel, `*model*: \`${cur}\`\nSet with \`/cc-model <value>\`  (sonnet · opus · haiku · fable)`)
       }
       return post(channel, `*effort*: \`${meta.effort || 'unknown'}\`\nSet with \`/cc-effort <value>\`  (low · medium · high · max)`)
     }
     if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
-    const val = rest.join(' ')
+    let val = rest.join(' ')
+    if (name === 'model') {
+      // A bare family alias selects the LONG-CONTEXT variant when this build has
+      // one (`opus` → claude-opus-5[1m]): the bigger window is the better default
+      // for bridged sessions, which run long. Claude Code's own alias resolves to
+      // the standard variant, so we translate to the full id ourselves. Passing a
+      // full id (e.g. `claude-opus-5`) still selects exactly that.
+      const models = await getModels()
+      const want = val.toLowerCase()
+      const pick = models.find(m => m.alias.toLowerCase() === `${want}-1m`)
+                || models.find(m => m.alias.toLowerCase() === want)
+      if (pick) val = pick.id
+    }
     await sendMenuCommand(session.tmux, `/${name} ${val}`)
     sessionMeta.set(session.id, { ...meta, [name]: val })
     if (name === 'effort') { session.effort = val; saveState(state) } // persist so resume restores it

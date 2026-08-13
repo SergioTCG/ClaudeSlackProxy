@@ -53,7 +53,7 @@ Commands are native Slack slash commands — type `/cc-` and Slack autocompletes
 | any message in a session channel | injected into that session (resurrects it if the terminal is gone) |
 | a file / image attachment | downloaded and handed to Claude as a local path to read |
 | `/cc-new [folder] [--dsp] [--chrome]` | start a session — no argument shows a project picker (dirs under `$HOME`) |
-| `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it — `/cc-model` with no arg lists available models with their real versions (read from the `claude` binary) |
+| `/cc-model [m]` / `/cc-effort [e]` | show the current value, or set it — `/cc-model` with no arg lists available models with their real versions (read from the `claude` binary); a family alias picks the 1M-context variant when one exists |
 | `/cc-update` | update Claude Code (`claude update`) and restart this session with the same flags, resuming the conversation — how you pick up a new CLI build or a newly released model |
 | `/cc-account [name]` | which Claude subscription pays for this session (see [Per-session subscriptions](#per-session-subscriptions)); switching restarts and resumes |
 | `/cc-status` | session info + manage collaborators here, or all sessions from the control channel |

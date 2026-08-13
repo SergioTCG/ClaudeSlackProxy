@@ -140,6 +140,10 @@ export async function tmuxAlive(tname) {
   try { await execFile('tmux', ['has-session', '-t', tname]); return true } catch { return false }
 }
 
+export async function tmuxAttached(tname) {
+  try { return (await execFile('tmux', ['list-clients', '-t', tname])).stdout.trim().length > 0 } catch { return false }
+}
+
 export async function tmuxKill(tname) {
   try { await execFile('tmux', ['kill-session', '-t', tname]) } catch {}
 }
@@ -272,12 +276,21 @@ export async function requestBridgeWindow(tmuxName, title) {
   click menu item "New Window" of menu 1 of menu bar item "File" of menu bar 1 of p
 end tell`
     await execFile('osascript', ['-e', script], { timeout: 10000 })
-    return true
   } catch (e) {
     try { fs.unlinkSync(spoolFile) } catch {} // never leave a stale claim behind
     log('single-icon window click failed (Accessibility?):', String(e?.stderr || e?.message || e).slice(0, 140))
     return false
   }
+  // A click that throws no error still may not produce a window (this is UI
+  // scripting). Verify the terminal actually appeared; otherwise reclaim the
+  // request and report failure so the caller can fall back to its own instance.
+  for (let i = 0; i < 12; i++) {
+    await sleep(1000)
+    if (await tmuxAttached(tmuxName)) return true
+  }
+  try { fs.unlinkSync(spoolFile) } catch {}
+  log('bridge window never materialized for', tmuxName, '— falling back')
+  return false
 }
 
 // Account names are interpolated into a shell command, so they are strictly
@@ -356,7 +369,9 @@ export async function availableModels(bin) {
   const families = ['opus', 'sonnet', 'haiku', 'fable']
   let out = ''
   try {
-    out = (await execFile('grep', ['-aoE', `claude-(${families.join('|')})-[0-9][a-z0-9-]*`, bin],
+    // `(\[1m\])?` also captures the long-context variants (e.g. claude-opus-5[1m]),
+    // which are separate model ids the plain family alias never selects.
+    out = (await execFile('grep', ['-aoE', `claude-(${families.join('|')})-[0-9][a-z0-9-]*(\\[1m\\])?`, bin],
       { maxBuffer: 8 << 20, timeout: 8000 })).stdout
   } catch { return [] } // grep exits non-zero on no match / unreadable binary → caller falls back
   const ids = [...new Set(out.split('\n').filter(Boolean))]
@@ -370,7 +385,12 @@ export async function availableModels(bin) {
     const nums = id => id.slice(pre.length).split('-').map(Number)
     clean.sort((a, b) => { const A = nums(a), B = nums(b); for (let i = 0; i < Math.max(A.length, B.length); i++) { const d = (A[i] || 0) - (B[i] || 0); if (d) return d } return 0 })
     const id = clean[clean.length - 1]
-    models.push({ alias: fam, id, name: `${fam[0].toUpperCase()}${fam.slice(1)} ${id.slice(pre.length).replace(/-/g, '.')}` })
+    const Fam = fam[0].toUpperCase() + fam.slice(1)
+    const ver = id.slice(pre.length).replace(/-/g, '.')
+    models.push({ alias: fam, id, name: `${Fam} ${ver}` })
+    // Long-context sibling, when this build has one: a distinct id, so it needs
+    // its own alias — the family alias always resolves to the standard variant.
+    if (ids.includes(`${id}[1m]`)) models.push({ alias: `${fam}-1m`, id: `${id}[1m]`, name: `${Fam} ${ver} (1M context)` })
   }
   return models
 }

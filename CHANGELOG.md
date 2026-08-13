@@ -4,6 +4,31 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.23] — 2026-08-13
+
+### Added
+- **Long-context models are selectable.** `Opus 5` and `Opus 5 (1M context)` are
+  distinct model ids (`claude-opus-5` vs `claude-opus-5[1m]`), and Claude Code's
+  family alias always resolves to the standard one — so the 1M variant was
+  unreachable from Slack, and invisible in `/cc-model`'s listing because the
+  enumerator's pattern stopped at word characters. Bracketed ids are now
+  discovered and listed, and **a bare family alias selects the long-context
+  variant when the build has one** (`/cc-model opus` → `claude-opus-5[1m]`),
+  since bridged sessions run long. Pass a full id for the standard window. The
+  rule is general: any family that gains a `[1m]` sibling picks it up.
+
+### Fixed
+- **Windows restored after a reboot became plain shells while their sessions ran
+  headless.** macOS reopens the bridge's Ghostty windows with an empty spool, so
+  the dispatcher fell through to a login shell and every session looked dead in
+  Slack. It now **adopts a live bridged session that has no window** instead.
+- **Window requests reported success even when no window appeared.** The scripted
+  File → New Window click can silently do nothing (UI scripting), leaving
+  sessions windowless with no error anywhere. The daemon now verifies the
+  terminal actually attached and falls back to a dedicated window otherwise.
+
+[0.2.23]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.23
+
 ## [0.2.22] — 2026-08-11
 
 ### Added
