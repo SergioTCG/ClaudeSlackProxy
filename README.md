@@ -1,146 +1,208 @@
-# ClaudeSlackProxy
+# Slack Agent Bridge
 
-Drive local [Claude Code](https://claude.com/claude-code) sessions from Slack, with opt-in [Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli) terminal support. Every session maps to its own private Slack channel — prompts, responses, tables, and file attachments flow both ways. Close your laptop and a session keeps running on your Mac; write in its channel later and it is transparently resurrected in a new terminal window.
+Control local [Claude Code](https://claude.com/claude-code) and
+[Codex CLI](https://developers.openai.com/codex/cli/) sessions from Slack. Each
+terminal session gets a private Slack channel where prompts, responses, tables,
+and attachments flow both ways. Close the terminal, write in Slack later, and
+the bridge opens a new Ghostty window and resumes the same conversation.
 
-It's the missing piece for managing many parallel Claude Code sessions when you're away from your machine — a channel per session, from your phone.
+The two providers deliberately have separate command namespaces: `/cc-*` is
+Claude Code and `/codex-*` is Codex. They share the reliable session, Slack,
+tmux, and Ghostty infrastructure without pretending that provider-specific
+capabilities are identical.
 
 > [!WARNING]
-> **This is remote code execution by design.** Slack-spawned Claude sessions run with `--dangerously-skip-permissions` by default; Slack-spawned Codex sessions run with `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Anyone who can post as you in your Slack workspace can steer them. Read [SECURITY.md](SECURITY.md) before installing. Not affiliated with Anthropic or OpenAI.
+> **This is remote code execution by design.** Slack-spawned Claude sessions
+> default to `--dangerously-skip-permissions`; Slack-spawned Codex sessions
+> default to `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Anyone
+> able to act as the bridge owner in Slack can steer processes on this Mac.
+> Read [SECURITY.md](SECURITY.md) before installing. This project is not
+> affiliated with Anthropic, OpenAI, or Slack.
 
 > [!NOTE]
-> **macOS only** (launchd, Ghostty, `open`). The Claude path uses the **Channels** research-preview API via `--dangerously-load-development-channels`; Codex uses lifecycle hooks plus tmux. Linux support (systemd + a terminal-agnostic spawner) is a welcome contribution.
+> **macOS only:** the current implementation uses launchd, Ghostty, and `open`.
+> Claude uses the Channels research-preview API; Codex uses lifecycle hooks and
+> tmux. Linux support needs a service and terminal-spawn adapter.
 
-## How it works
+## What is supported
 
-A launchd daemon owns one Slack [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/) connection (outbound only — no inbound ports). Claude uses global hooks plus a per-session MCP Channel server; Codex uses its lifecycle hooks for outbound events and tmux for inbound prompts. `ccs` and `ccs-codex` wrap their respective CLIs in tmux so the daemon can drive them. See [ARCHITECTURE.md](ARCHITECTURE.md), the original [Claude feasibility study](FEASIBILITY.md), and the [Codex feasibility study](CODEX-FEASIBILITY.md).
+| Capability | Claude Code | Codex CLI |
+|---|---:|---:|
+| Private channel per terminal session | ✓ | ✓ |
+| Slack prompts and file attachments | ✓ | ✓ |
+| Mirrored prompts and final responses | ✓ | ✓ |
+| Terminal-close detection and Slack resume | ✓ | ✓ |
+| Model and reasoning-effort controls | ✓ | ✓ |
+| Approve/deny from Slack in permissioned mode | ✓ | ✓ |
+| Default unattended mode | `--dangerously-skip-permissions` | `--yolo` |
+| Claude subscription switching and `ccusage` | ✓ | — |
+| Chrome integration flag | `--chrome` | No direct counterpart |
+| Live web search flag | Provider-managed | `--search` |
+
+Codex output uses stable hook fields and never parses its unstable transcript
+JSONL. Claude retains its MCP Channel and transcript/status integration. See
+[the architecture](ARCHITECTURE.md) and the original
+[Claude](docs/claude-feasibility.md) and
+[Codex](docs/codex-feasibility.md) feasibility studies.
 
 ## Prerequisites
 
-- macOS with [Homebrew](https://brew.sh)
-- [Claude Code](https://claude.com/claude-code) (`claude`), signed in — a plan with the Channels research preview
-- Optional: Codex CLI (`codex`), signed in, for Codex terminal sessions
-- `node` ≥ 18, `tmux`, `jq`, `git` — `brew install node tmux jq git`
-- [Ghostty](https://ghostty.org) (for remote session spawn/resume)
-- A Slack workspace where you can create an app
+- macOS and [Ghostty](https://ghostty.org)
+- Node.js 20 or later, `tmux`, `jq`, and `git`
+- At least one signed-in provider CLI: Claude Code, Codex CLI, or both
+- A Slack workspace where you may create an app
+
+With Homebrew, the common command-line dependencies are:
+
+```bash
+brew install node tmux jq git
+```
 
 ## Install
 
+Choose the provider set when installing. A flagless installation remains
+Claude-only for compatibility with pre-1.0 behavior.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SergioTCG/ClaudeSlackProxy/main/install.sh | bash
+# Claude Code only (the backward-compatible default)
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash
+
+# Codex only
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider codex
+
+# Both providers
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider both
 ```
 
-Three steps, mostly clicking:
+The installer opens a pre-filled Slack app page. Create the app, install it to
+the workspace, then paste its bot token (`xoxb-…`) and an app-level Socket Mode
+token (`xapp-…`, scope `connections:write`). It validates both tokens, installs
+the selected hooks and launchers, and loads one local LaunchAgent. Run
+`/cc-claim` in Slack to bind the bridge to your Slack user.
 
-1. **The installer opens a pre-filled Slack app page** (your app, your workspace — nothing is shared). Click **Create**, then **Install App → Install to Workspace**, then generate an app-level token under **Basic Information → App-Level Tokens** (scope `connections:write`).
-2. **Paste the two tokens** (`xoxb-…`, `xapp-…`) into the installer. It validates both live and figures out the team ID itself.
-3. **Run `/cc-claim` in Slack.** The daemon records you as the owner — no digging your member ID out of your profile. Only the owner's messages are ever acted on (plus any [collaborators](#use) you whitelist per channel).
+Fresh installations use `~/.slack-agent-bridge`. An upgrade keeps an existing
+`~/.claudeslackproxy` checkout, `~/.config/ccs` state, Slack channels, and the
+historical launchd label. The installer will not create a second daemon or move
+a working installation underneath running sessions.
 
-That's the whole setup. The installer also clones to `~/.claudeslackproxy` (or runs from your own clone), checks prerequisites, installs deps, symlinks `ccs`, registers hooks in `~/.claude/settings.json` (merging, never clobbering), and loads the daemon as a LaunchAgent. Idempotent — safe to re-run. From then on the bridge [keeps itself up to date](#operations).
+### Add Codex to an existing Claude installation
 
-Codex activation is deliberately separate so a Claude-only install is unchanged:
+The compatibility installer stages Codex without restarting the live daemon:
 
 ```bash
 ./install-codex.sh
-# during a safe maintenance window:
-launchctl kickstart -k gui/$(id -u)/si.sergej.claudeslackproxy
-ccs-codex
 ```
 
-In that first Codex session, run `/hooks` and trust the new user hook, then exit and run `ccs-codex` again. Hook trust is hash-based and is never bypassed automatically. The Codex installer merges `~/.codex/hooks.json`, links `ccs-codex`, and does **not** restart the daemon.
+During a safe maintenance window, restart the bridge and launch `ccs-codex`.
+In that first Codex session, run `/hooks` and explicitly trust the user hook,
+then exit and launch it again. Hook trust is hash-based and is never bypassed.
 
-Existing installations must also apply the updated [Slack app manifest](spike/slack-app-manifest.json) to their existing app once. This registers the `/codex-*` command names; it does not create a second app or change the bot/app tokens or OAuth scopes.
-
-> **Why isn't this a public "Add to Slack" app?** Socket Mode delivers an app's events over the app-level token — one shared stream per *app*, capped at 10 connections. A single public app would fan every workspace's events across every user's local daemon. Your own app means your tokens and your traffic never leave your machine, which is the point.
+Existing apps already configured for `v0.2.28` need no Slack changes for 1.0.
+Older apps that do not have `/codex-*` must apply the canonical
+[Slack app manifest](slack/app-manifest.json) to the **same app** once. This
+does not change tokens or OAuth scopes and never requires a second Slack app.
+Applying it again only updates metadata and command descriptions.
 
 ## Use
 
+Start a bridged terminal locally:
+
 ```bash
-ccs --dangerously-skip-permissions        # any claude flags pass through
-ccs-codex                                 # opt-in Codex terminal session
+ccs [Claude flags]
+ccs-codex [Codex flags]
 ```
 
-A private channel `#{repo}-{branch}-{timestamp}` appears and you're invited. Rename it freely — the mapping is by channel ID. Then, from Slack:
-
-Commands are native Slack slash commands. `/cc-*` always means Claude Code;
-`/codex-*` always means Codex. Type either prefix and Slack autocompletes it.
+A private channel named from the repository, branch, and timestamp appears and
+you are invited. You may rename it; the bridge stores the immutable channel ID.
 
 | In Slack | Effect |
 |---|---|
-| any message in a session channel | injected into that session (resurrects it if the terminal is gone) |
-| a file / image attachment | downloaded and handed to the active agent as a local path to read |
-| `/cc-new [folder] [flags]` / `/codex-new [folder] [flags]` | start a Claude or Codex session; no folder shows that provider's project picker; defaults come from `CCS_NEW_FLAGS` / `CCS_CODEX_NEW_FLAGS` |
-| `/cc-model [m]` / `/codex-model [m]` | show or set that provider's model |
-| `/cc-effort [e]` / `/codex-effort [e]` | show or set reasoning effort; Codex changes restart/resume the conversation |
-| `/cc-update` / `/codex-update` | update the selected CLI and restart/resume the session with the same flags |
-| `/cc-flags [flags…]` / `/codex-flags [flags…]` | show or change provider-allowlisted launch flags — restarts and resumes |
-| `/cc-account [name]` | Claude-only subscription binding (see [Per-session subscriptions](#per-session-subscriptions)) |
-| `/cc-status` / `/codex-status` | session info + collaborators here, or provider-filtered sessions in control |
-| `/cc-stop` / `/codex-stop` | interrupt that provider's running turn |
-| `/cc-kill [<id>]` / `/codex-kill [<id>]` | end that provider's session (channel stays, resumable) |
-| `/cc-help` / `/codex-help` | list commands for that provider |
-| `/cc-usage [days [n] \| models \| limits]` | Claude-only token/cost usage via [ccusage](https://github.com/ryoppippi/ccusage); use Codex terminal `/usage` for Codex |
-| `/cc-health` / `/cc-cleanup` / `/cc-claim` | bridge-wide commands; intentionally not duplicated under `/codex-*` |
-| a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or `yes <id>` / `no <id>` |
+| Any message in a session channel | Inject into that session; resume it first if dormant |
+| File or image attachment | Download locally and provide the path to the agent |
+| `/cc-new [folder] [flags]` / `/codex-new [folder] [flags]` | Start the selected provider |
+| `/cc-model [model]` / `/codex-model [model]` | Show or change the provider model |
+| `/cc-effort [level]` / `/codex-effort [level]` | Show or change reasoning effort |
+| `/cc-flags [flags]` / `/codex-flags [flags]` | Show or replace allowlisted launch flags |
+| `/cc-update` / `/codex-update` | Update the selected CLI and resume the session |
+| `/cc-status` / `/codex-status` | Session details or a provider-filtered list |
+| `/cc-stop` / `/codex-stop` | Interrupt the current turn |
+| `/cc-kill [id]` / `/codex-kill [id]` | End the process; keep its resumable channel |
+| `/cc-help` / `/codex-help` | Show commands for that provider |
+| `/cc-account [name]` | Bind a Claude session to a stored Claude subscription |
+| `/cc-usage [days [n] \| models \| limits]` | Claude usage via `ccusage`; use Codex `/usage` locally |
+| `/cc-health` / `/cc-cleanup` / `/cc-claim` | Bridge-wide operations |
 
-With no explicit flags, `/cc-new` defaults to `--dangerously-skip-permissions`
-and `/codex-new` defaults to the canonical
-`--dangerously-bypass-approvals-and-sandbox`; `--yolo` is accepted as its short
-alias and normalized to the canonical form. Explicit flags replace the default.
-The same provider-specific fallback is used when an old session has no launch
-flags to preserve. Override these operator defaults with `CCS_NEW_FLAGS`,
-`CCS_CODEX_NEW_FLAGS`, `CCS_RESUME_FLAGS`, and `CCS_CODEX_RESUME_FLAGS`.
+With no explicit Slack flags, `/cc-new` uses
+`--dangerously-skip-permissions` and `/codex-new` uses Codex's canonical
+dangerous flag. Explicit flags replace that default. Operator overrides are
+available through `CCS_NEW_FLAGS`, `CCS_CODEX_NEW_FLAGS`, `CCS_RESUME_FLAGS`,
+and `CCS_CODEX_RESUME_FLAGS`.
 
-Claude's `--chrome` has no direct Codex CLI flag counterpart. Codex's optional
-`--search` enables live web search (instead of its cached search default), but
-does not control a Chrome browser. Browser automation requires a separately
-configured MCP server or plugin and is not enabled by this bridge.
+Claude's `--chrome` has no Codex CLI equivalent. Codex `--search` controls live
+web search, not a Chrome browser; browser automation requires a separately
+configured MCP server or plugin.
 
-**Collaborators.** From `/cc-status` or `/codex-status` in its matching session channel, a user-picker lets you allow specific Slack teammates to send prompts to that session (a Remove button revokes them; the current list is shown). Their prompts are injected labelled `[Slack collaborator <name>]`, so the transcript records who said what. Collaborators can send prompts only — not permission verdicts, slash commands, or session resurrection — and only while the session is live. Everything else stays owner-only, and the whitelist is per channel and survives restarts.
+### Collaborators
 
-While a Claude turn runs, the terminal's spinner (verb, elapsed, tokens) mirrors into an edit-in-place status message. Codex shows a generic working status and mirrors its stable final hook text; its unstable JSONL is never parsed. The channel topic tracks `folder · branch · model · effort`. Responses over ~6,000 chars upload as a `response.md` file. Claude consent dialogs are auto-dismissed; Codex hook trust remains an explicit local action. Sessions never archive on their own — a dormant channel says "write here to resume," and doing so spawns a Ghostty window and continues where you left off.
+`/cc-status` or `/codex-status` in the matching session channel provides a
+user-picker for collaborators. Allowed teammates may send labelled prompts to
+a live session, but cannot run slash commands, answer permission prompts, or
+resurrect it. All other actions remain owner-only. The per-channel allowlist is
+persisted across daemon restarts.
 
-## Per-session subscriptions
-
-By default every session runs under the Mac's own Claude login. When you invite
-collaborators, you can instead bind a session to **its owner's** subscription, so
-each person's usage bills to their own account:
+### Per-session Claude subscriptions
 
 ```bash
-ccs-account add tina        # sign in as that person → mints a long-lived token
-ccs-account list            # names, tokens masked
+ccs-account add tina
+ccs-account list
 ```
 
-Then in the session's channel: `/cc-account tina` (restarts and resumes the same
-conversation), or start one bound from the outset with
-`/cc-new <folder> --account tina`. `/cc-account default` reverts to the machine's
-own login. Bindings survive resume and daemon restarts.
+Use `/cc-account tina` in a Claude session or start one with
+`/cc-new <folder> --account tina`. Tokens remain in
+`~/.config/ccs/accounts` with mode `0600`; the launcher resolves them through
+the environment so bearer tokens never appear in process arguments.
 
-Tokens live only in `~/.config/ccs/accounts` (mode 0600) and are resolved inside
-`ccs` at launch — the command line carries only the account name, because `ps`
-exposes argv to every user on the machine. A long-lived token is a bearer
-credential for that subscription: treat the file like a password store, and note
-that whoever administers the Mac necessarily holds it.
+## Upgrade from ClaudeSlackProxy
+
+Version 1.0 changes the public name, not the installed protocol:
+
+- `/cc-*`, `/codex-*`, `ccs`, and `ccs-codex` are unchanged.
+- `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
+- Existing `~/.claudeslackproxy` installations remain in place.
+- `si.sergej.claudeslackproxy` remains the sole LaunchAgent label.
+- Existing `#claude-code-bridge` control channels are reused. Fresh installs
+  use `#slack-agent-bridge`.
+- The installer updates only the historical upstream Git remote; contributor
+  forks are left untouched.
+
+See [the 1.0 migration guide](docs/migrating-to-1.0.md) before rolling a live
+installation forward or back.
 
 ## Operations
 
-- **Dock clutter:** each session's window is its own Ghostty instance (macOS
-  Ghostty has no IPC to open windows in a running one), so by default each adds a
-  Dock icon. Set `CCS_GHOSTTY_HIDDEN=1` in `~/.config/ccs/env` to run them as
-  accessory windows instead — fully visible and titled with the channel topic,
-  but **no Dock icons at all**; reach them via Mission Control or `tmux attach`.
-  (`CCS_GHOSTTY_SINGLE=1` aimed to put every window under one shared icon via UI
-  scripting; current Ghostty ignores programmatic window creation, so it degrades
-  to one instance per session after a restart — see the 0.2.25 changelog.)
-- **Auto-update:** the daemon checks GitHub at startup and every 6 hours; when a
-  new release lands it fast-forwards its clone, refreshes dependencies if needed,
-  and restarts itself (sessions keep running — the daemon re-adopts them). It
-  never touches an install with local changes or local commits. Opt out with
-  `CCS_AUTO_UPDATE=0` in `~/.config/ccs/env`; update manually anytime with
-  `git -C <clone> pull` + the restart command below.
 - **Logs:** `tail -f daemon.log`
-- **Restart the daemon:** `launchctl kickstart -k gui/$(id -u)/si.sergej.claudeslackproxy` — never `kill` by port (that also kills attached channel servers).
-- **Uninstall:** `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/si.sergej.claudeslackproxy.plist`, then remove the symlink and the hooks block from `~/.claude/settings.json`.
-- **Config/state:** `~/.config/ccs/` (`env`, `state.json`) — outside the repo, so `git pull` never touches your secrets.
+- **Config/state:** `~/.config/ccs/` (`env`, `state.json`, and accounts)
+- **Restart:** `launchctl kickstart -k gui/$(id -u)/si.sergej.claudeslackproxy`
+- **Disable self-update:** set `CCS_AUTO_UPDATE=0` in `~/.config/ccs/env`
+- **Dockless Ghostty windows:** set `CCS_GHOSTTY_HIDDEN=1`
+- **Uninstall:** boot out `~/Library/LaunchAgents/si.sergej.claudeslackproxy.plist`, then remove the launchers and exact hook entries
+
+The daemon self-updater fast-forwards only a clean checkout with no local
+commits. It refreshes dependencies when `package.json` changes, waits for active
+turns when possible, exits, and lets launchd restart it. Sessions continue in
+tmux and are re-adopted after restart.
+
+## Development
+
+Read [AGENTS.md](AGENTS.md) before changing runtime behavior. The release and
+migration invariants are tested with:
+
+```bash
+npm ci
+npm run audit
+npm test
+npm run check
+```
 
 ## License
 

@@ -1,6 +1,9 @@
-# ClaudeSlackProxy — Architecture (v2, multi-provider)
+# Slack Agent Bridge — Architecture
 
-*Decided 2026-07-21 after the feasibility study + spike (see FEASIBILITY.md). Language: TypeScript-flavored modern JS (ESM, Node 24, no build step). All Slack mechanisms and the channel-injection path were empirically proven before this design was fixed.*
+*The original design was decided on 2026-07-21 after the
+[Claude feasibility study](docs/claude-feasibility.md) and empirical spike.
+Codex was added as a provider adapter on 2026-08-14. The implementation is
+modern JavaScript (ESM, Node 20+, no build step).*
 
 ## Components
 
@@ -42,7 +45,11 @@ Slack (private channels, Socket Mode)
 5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
 7. **Mirroring is hook-driven and token-free.** Claude keeps its byte-offset JSONL reader and TUI status/form parser. Codex uses the stable `Stop.last_assistant_message` hook field and never parses its explicitly unstable transcript format. Slack-injected messages are deduped for both.
-8. **Control channel** `#claude-code-bridge` — created by the daemon at startup for commands when no session channel exists yet: `/cc-new` or `/codex-new`, provider-filtered status, and help. Session channels accept plain messages (→ injection) plus the matching provider namespace's session commands.
+8. **One control channel** — fresh 1.0 installs use
+   `#slack-agent-bridge`; upgrades reuse `#claude-code-bridge`. Its immutable
+   channel ID lives in state, so the public rename never creates a duplicate.
+   It accepts `/cc-new` or `/codex-new`, provider-filtered status, and help.
+   Session channels accept plain messages plus their provider namespace.
 
 ## Command grammar (Slack)
 
@@ -69,7 +76,13 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".
 - You may rename channels freely — mapping is by immutable channel id.
 
-## Known taxes / deferred
+## Known limitations
 
 - Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.
-- Deferred to v2: streaming responses (chat.startStream — proven, not wired), permission relay for non-dsp sessions, file upload for >40k outputs, worktree-registry integration for richer channel names (e.g. issue numbers).
+- Codex exposes stable final-text hooks, not the live whimsical status and TUI
+  structures used by Claude. The bridge deliberately does not parse Codex JSONL.
+- Ghostty on macOS has no reliable IPC for adding windows to one running app
+  instance. Dockless accessory windows are supported; single-icon mode remains
+  best-effort.
+- Streaming response APIs are proven but not wired; long responses are uploaded
+  as Markdown files.

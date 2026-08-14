@@ -1,4 +1,4 @@
-# Slack ↔ Claude Code Bridge — Feasibility Study
+# Claude Code provider — original feasibility study
 
 *Investigated 2026-07-21. Local environment: Claude Code 2.1.216, macOS, Node 24.3.0 (no tmux, no Bun). Slack facts verified against docs.slack.dev; Claude Code facts against code.claude.com/docs.*
 

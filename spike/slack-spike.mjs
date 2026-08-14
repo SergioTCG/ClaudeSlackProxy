@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Slack-side spike: validates every Slack API mechanism the bridge design relies on.
-// Run: set -a; source .env; set +a; node slack-spike.mjs
+// Run only against a test app: set -a; source .env; set +a; node slack-spike.mjs
 import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 
@@ -24,11 +24,12 @@ await step('auth.test', async () => {
   return { team: r.team, team_id: r.team_id, bot_user: r.user_id }
 })
 
-await step('find-human-user', async () => {
-  const r = await web.users.list({ limit: 50 })
-  const humans = r.members.filter(m => !m.is_bot && !m.deleted && m.id !== 'USLACKBOT')
-  ctx.userId = humans[0]?.id
-  return { picked: ctx.userId, name: humans[0]?.real_name || humans[0]?.name, human_count: humans.length }
+await step('resolve-explicit-test-user', async () => {
+  if (!process.env.SLACK_USER_ID) throw new Error('SLACK_USER_ID is required; never guess a workspace member')
+  const r = await web.users.info({ user: process.env.SLACK_USER_ID })
+  if (r.user?.is_bot || r.user?.deleted) throw new Error('SLACK_USER_ID must identify an active human')
+  ctx.userId = r.user.id
+  return { picked: ctx.userId, name: r.user.real_name || r.user.name }
 })
 
 const stamp = new Date().toTimeString().slice(0, 5).replace(':', '')

@@ -1,4 +1,4 @@
-# Codex terminal support — feasibility study
+# Codex provider — feasibility study
 
 *Investigated and implemented 2026-08-14 against Codex CLI 0.147.0 on macOS.*
 

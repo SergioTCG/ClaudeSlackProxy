@@ -1,110 +1,208 @@
 #!/bin/bash
-# ClaudeSlackProxy installer (macOS). Idempotent — safe to re-run.
-#   One-liner:     curl -fsSL https://raw.githubusercontent.com/SergioTCG/ClaudeSlackProxy/main/install.sh | bash
-#   From a clone:  ./install.sh
+# Slack Agent Bridge installer (macOS). Idempotent and upgrade-safe.
+#   One-liner: curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash
+#   Providers: ./install.sh --provider claude|codex|both
 set -euo pipefail
 
-REPO_URL="https://github.com/SergioTCG/ClaudeSlackProxy.git"
+REPO_URL="https://github.com/SergioTCG/SlackAgentBridge.git"
+INSTALL_PROVIDER="${CCS_INSTALL_PROVIDER:-claude}"
+RELOAD_DAEMON=1
+
+usage() {
+  cat <<'EOF'
+Usage: ./install.sh [--provider claude|codex|both] [--no-daemon-reload]
+
+  --provider             Install one CLI integration or both (default: claude).
+  --no-daemon-reload     Stage files and hooks without touching the live daemon.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --provider)
+      [ "$#" -ge 2 ] || { printf 'Missing value for --provider\n' >&2; exit 2; }
+      INSTALL_PROVIDER="$2"; shift 2 ;;
+    --no-daemon-reload) RELOAD_DAEMON=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+case "$INSTALL_PROVIDER" in
+  claude|codex|both) ;;
+  *) printf 'Unsupported provider: %s (use claude, codex, or both)\n' "$INSTALL_PROVIDER" >&2; exit 2 ;;
+esac
+
 BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd)"
 [ -n "$BRIDGE" ] || BRIDGE="$(pwd)"
-# Piped via curl (or run outside a clone): clone to a standard spot, hand off.
+
+# Piped via curl (or run outside a clone): preserve an existing legacy checkout
+# and use the neutral directory only for a fresh installation.
 if [ ! -f "$BRIDGE/daemon/daemon.mjs" ]; then
-  DEST="${CCS_HOME:-$HOME/.claudeslackproxy}"
-  echo "Cloning ClaudeSlackProxy to $DEST..."
-  if [ -d "$DEST/.git" ]; then git -C "$DEST" pull --ff-only || true; else git clone "$REPO_URL" "$DEST"; fi
-  exec bash "$DEST/install.sh"
+  LEGACY_DEST="$HOME/.claudeslackproxy"
+  NEUTRAL_DEST="$HOME/.slack-agent-bridge"
+  if [ -n "${CCS_HOME:-}" ]; then DEST="$CCS_HOME"
+  elif [ -d "$LEGACY_DEST/.git" ]; then DEST="$LEGACY_DEST"
+  elif [ -d "$NEUTRAL_DEST/.git" ]; then DEST="$NEUTRAL_DEST"
+  else DEST="$NEUTRAL_DEST"
+  fi
+  printf 'Installing Slack Agent Bridge in %s…\n' "$DEST"
+  if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
+    old_origin="$(git -C "$DEST" remote get-url origin 2>/dev/null || true)"
+    case "$old_origin" in *SergioTCG/ClaudeSlackProxy*) git -C "$DEST" remote set-url origin "$REPO_URL" ;; esac
+    git -C "$DEST" pull --ff-only
+  else
+    git clone "$REPO_URL" "$DEST"
+  fi
+  if [ "$RELOAD_DAEMON" = 0 ]; then
+    exec bash "$DEST/install.sh" --provider "$INSTALL_PROVIDER" --no-daemon-reload
+  fi
+  exec bash "$DEST/install.sh" --provider "$INSTALL_PROVIDER"
 fi
+
 CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
-BIN_DIR="/opt/homebrew/bin"
+BIN_DIR="${CCS_BIN_DIR:-/opt/homebrew/bin}"
+# Compatibility contract: do not create a second LaunchAgent during the rename.
 LABEL="si.sergej.claudeslackproxy"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-SETTINGS="$HOME/.claude/settings.json"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 LOG="$BRIDGE/daemon.log"
 
 say() { printf '%s\n' "$*"; }
+wants_claude() { [ "$INSTALL_PROVIDER" = claude ] || [ "$INSTALL_PROVIDER" = both ]; }
+wants_codex() { [ "$INSTALL_PROVIDER" = codex ] || [ "$INSTALL_PROVIDER" = both ]; }
 
-say "Installing ClaudeSlackProxy from $BRIDGE"
+say "Installing Slack Agent Bridge ($INSTALL_PROVIDER) from $BRIDGE"
+
+# Migrate only the known historical upstream; never rewrite a contributor's fork.
+if [ "${CCS_SKIP_GIT_REMOTE_MIGRATION:-0}" != 1 ] && { [ -d "$BRIDGE/.git" ] || git -C "$BRIDGE" rev-parse --git-dir >/dev/null 2>&1; }; then
+  old_origin="$(git -C "$BRIDGE" remote get-url origin 2>/dev/null || true)"
+  case "$old_origin" in
+    *SergioTCG/ClaudeSlackProxy*)
+      git -C "$BRIDGE" remote set-url origin "$REPO_URL"
+      say "  migrated Git remote to $REPO_URL" ;;
+  esac
+fi
 
 # ---- 1. prerequisites -------------------------------------------------------
 missing=0
-for cmd in node npm tmux git jq claude; do
+for cmd in node npm tmux git jq; do
   if command -v "$cmd" >/dev/null 2>&1; then say "  ✓ $cmd"; else say "  ✗ missing: $cmd"; missing=1; fi
 done
+if wants_claude; then
+  if command -v claude >/dev/null 2>&1; then say "  ✓ claude"; else say "  ✗ missing: claude"; missing=1; fi
+fi
+if wants_codex; then
+  if command -v codex >/dev/null 2>&1; then say "  ✓ codex"; else say "  ✗ missing: codex"; missing=1; fi
+fi
 [ -d /Applications/Ghostty.app ] || say "  ! Ghostty not found — remote spawn/resume needs it (https://ghostty.org)"
 if [ "$missing" = 1 ]; then say "Install the missing prerequisites and re-run."; exit 1; fi
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-[ "$NODE_MAJOR" -ge 18 ] || { say "Node >= 18 required (have $(node -v))"; exit 1; }
+[ "$NODE_MAJOR" -ge 20 ] || { say "Node >= 20 required (have $(node -v))"; exit 1; }
 
-# ---- 2. dependencies --------------------------------------------------------
-say "Installing dependencies…"
-( cd "$BRIDGE" && { npm ci --omit=dev >/dev/null 2>&1 || npm install --omit=dev >/dev/null 2>&1; } )
-
-# ---- 3. link ccs + make scripts executable ----------------------------------
+# ---- 2. dependencies and launchers -----------------------------------------
+if [ "${CCS_SKIP_DEPENDENCY_INSTALL:-0}" = 1 ]; then
+  say "Skipping dependency installation (test override)."
+elif [ "$RELOAD_DAEMON" = 0 ]; then
+  say "Leaving live dependencies untouched during staged activation."
+else
+  say "Installing dependencies…"
+  ( cd "$BRIDGE" && { npm ci --omit=dev >/dev/null 2>&1 || npm install --omit=dev >/dev/null 2>&1; } )
+fi
 mkdir -p "$BIN_DIR"
-ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
 ln -sf "$BRIDGE/bin/ccs-spawn" "$BIN_DIR/ccs-spawn"
-ln -sf "$BRIDGE/bin/ccs-account" "$BIN_DIR/ccs-account"
-chmod +x "$BRIDGE/bin/ccs" "$BRIDGE/bin/ccs-consent" "$BRIDGE/bin/ccs-window" "$BRIDGE/bin/ccs-spawn" "$BRIDGE/bin/ccs-account" "$BRIDGE/hooks/hook.sh" \
-         "$BRIDGE/daemon/daemon.mjs" "$BRIDGE/channel/server.mjs" 2>/dev/null || true
-say "  linked $BIN_DIR/ccs"
+if wants_claude; then
+  ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
+  ln -sf "$BRIDGE/bin/ccs-account" "$BIN_DIR/ccs-account"
+  say "  linked $BIN_DIR/ccs"
+fi
+if wants_codex; then
+  ln -sf "$BRIDGE/bin/ccs-codex" "$BIN_DIR/ccs-codex"
+  say "  linked $BIN_DIR/ccs-codex"
+fi
+chmod +x "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
+  "$BRIDGE"/bin/ccs-window "$BRIDGE"/bin/ccs-spawn "$BRIDGE"/bin/ccs-account \
+  "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \
+  "$BRIDGE"/daemon/daemon.mjs "$BRIDGE"/channel/server.mjs 2>/dev/null || true
 
-# ---- 4. config + Slack app (pre-filled creation link, 2 tokens, no IDs) -----
+# ---- 3. config + Slack app --------------------------------------------------
 mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR" 2>/dev/null || true
 if [ ! -f "$CONFIG_DIR/env" ]; then
   if [ -r /dev/tty ]; then
-    MANIFEST="$BRIDGE/spike/slack-app-manifest.json"
+    MANIFEST="$BRIDGE/slack/app-manifest.json"
     APP_URL="https://api.slack.com/apps?new_app=1&manifest_yaml=$(node -e 'process.stdout.write(encodeURIComponent(require("fs").readFileSync(process.argv[1],"utf8")))' "$MANIFEST")"
     say ""
-    say "Create your Slack app — the page opens PRE-FILLED, you just click through:"
+    say "Create your Slack app — the page opens pre-filled:"
     say "  1. Pick your workspace → Next → Create."
-    say "  2. Left sidebar: Install App → Install to Workspace → Allow."
-    say "     Copy the Bot User OAuth Token (xoxb-…)."
-    say "  3. Basic Information → App-Level Tokens → Generate Token and Scopes:"
-    say "     name it anything, add scope connections:write, Generate. Copy it (xapp-…)."
+    say "  2. Install App → Install to Workspace; copy the xoxb token."
+    say "  3. Basic Information → App-Level Tokens; create a connections:write xapp token."
     open "$APP_URL" 2>/dev/null || say "  Open this URL: $APP_URL"
     read -r -p "  SLACK_BOT_TOKEN (xoxb-…): " BOT < /dev/tty
     read -r -p "  SLACK_APP_TOKEN (xapp-…): " APP < /dev/tty
-    # Validate both tokens live and derive the team id — typos fail here, not at 2am.
     AUTH="$(curl -s -H "Authorization: Bearer $BOT" https://slack.com/api/auth.test)"
-    [ "$(printf %s "$AUTH" | jq -r .ok)" = "true" ] || { say "  ✗ bot token rejected ($(printf %s "$AUTH" | jq -r .error)) — re-run install.sh"; exit 1; }
+    [ "$(printf %s "$AUTH" | jq -r .ok)" = true ] || { say "  ✗ bot token rejected ($(printf %s "$AUTH" | jq -r .error))"; exit 1; }
     STEAM="$(printf %s "$AUTH" | jq -r .team_id)"
     CONN="$(curl -s -X POST -H "Authorization: Bearer $APP" https://slack.com/api/apps.connections.open)"
-    [ "$(printf %s "$CONN" | jq -r .ok)" = "true" ] || { say "  ✗ app token rejected ($(printf %s "$CONN" | jq -r .error)) — needs scope connections:write; re-run install.sh"; exit 1; }
-    say "  ✓ tokens valid for workspace \"$(printf %s "$AUTH" | jq -r .team)\" (team $STEAM)"
+    [ "$(printf %s "$CONN" | jq -r .ok)" = true ] || { say "  ✗ app token rejected ($(printf %s "$CONN" | jq -r .error))"; exit 1; }
     umask 177
-    cat > "$CONFIG_DIR/env" <<EOF
-SLACK_BOT_TOKEN=$BOT
-SLACK_APP_TOKEN=$APP
-SLACK_TEAM_ID=$STEAM
-EOF
-    say "  wrote $CONFIG_DIR/env — ownership is claimed from Slack afterwards (/cc-claim)"
+    printf 'SLACK_BOT_TOKEN=%s\nSLACK_APP_TOKEN=%s\nSLACK_TEAM_ID=%s\n' "$BOT" "$APP" "$STEAM" > "$CONFIG_DIR/env"
+    say "  wrote $CONFIG_DIR/env; ownership is claimed later with /cc-claim"
   else
     say "  ! No TTY — create $CONFIG_DIR/env with SLACK_BOT_TOKEN / SLACK_APP_TOKEN, then re-run."
     exit 1
   fi
 else
+  chmod 600 "$CONFIG_DIR/env" 2>/dev/null || true
   say "  $CONFIG_DIR/env exists — keeping it"
 fi
 
-# ---- 5. register hooks in settings.json (non-destructive, idempotent) -------
-mkdir -p "$(dirname "$SETTINGS")"
-[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-HOOK="$BRIDGE/hooks/hook.sh"
-for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop; do
-  tmp="$(mktemp)"
-  jq --arg ev "$ev" --arg cmd "$HOOK" '
-    .hooks = (.hooks // {}) |
-    .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
-      if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
-      else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}] end)
-  ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-done
-say "  registered hooks in $SETTINGS"
+# ---- 4. provider hooks (merge, never clobber) -------------------------------
+if wants_claude; then
+  mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+  [ -f "$CLAUDE_SETTINGS" ] || printf '{}\n' > "$CLAUDE_SETTINGS"
+  HOOK="$BRIDGE/hooks/hook.sh"
+  for ev in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop; do
+    tmp="$(mktemp)"
+    jq --arg ev "$ev" --arg cmd "$HOOK" '
+      .hooks = (.hooks // {}) |
+      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
+        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
+        else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd}]}] end)
+    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+  done
+  say "  registered Claude hooks in $CLAUDE_SETTINGS"
+fi
 
-# ---- 6. LaunchAgent ---------------------------------------------------------
-NODE_BIN="$(command -v node)"
-mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$PLIST" <<EOF
+if wants_codex; then
+  mkdir -p "$CODEX_DIR"
+  [ -f "$CODEX_HOOKS" ] || printf '{}\n' > "$CODEX_HOOKS"
+  HOOK="$BRIDGE/hooks/codex-hook.sh"
+  for ev in SessionStart SessionEnd UserPromptSubmit Stop; do
+    tmp="$(mktemp)"
+    jq --arg ev "$ev" --arg cmd "$HOOK" '
+      .hooks = (.hooks // {}) |
+      .hooks[$ev] = ((.hooks[$ev] // []) as $arr |
+        if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
+        else $arr + [{hooks: [{type: "command", command: $cmd, timeout: 3}]}] end)
+    ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+  done
+  tmp="$(mktemp)"
+  jq --arg cmd "$HOOK" '
+    .hooks = (.hooks // {}) |
+    .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) as $arr |
+      if ([$arr[].hooks[]?.command] | index($cmd)) then $arr
+      else $arr + [{matcher: ".*", hooks: [{type: "command", command: $cmd, timeout: 590, statusMessage: "Waiting for Slack approval"}]}] end)
+  ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+  say "  registered Codex hooks in $CODEX_HOOKS"
+fi
+
+# ---- 5. legacy-compatible LaunchAgent --------------------------------------
+if [ "$RELOAD_DAEMON" = 1 ]; then
+  NODE_BIN="$(command -v node)"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -118,14 +216,19 @@ cat > "$PLIST" <<EOF
   <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 EOF
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-say "  loaded LaunchAgent $LABEL"
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  say "  loaded LaunchAgent $LABEL"
+else
+  say "  left the live LaunchAgent $LABEL untouched"
+fi
 
 say ""
-say "✅ Installed — one step left, in Slack:"
-say "   Run /cc-claim in any channel to become the bridge's owner."
-say "   (You'll be invited to a private #claude-code-bridge control channel.)"
-say ""
-say "   Start a bridged session anywhere:   ccs --dangerously-skip-permissions"
-say "   Logs:  tail -f $LOG"
+say "✅ Slack Agent Bridge files installed for: $INSTALL_PROVIDER"
+say "   Claim a fresh bridge in Slack with /cc-claim."
+if wants_claude; then say "   Start Claude locally: ccs"; fi
+if wants_codex; then
+  say "   Before the first Codex session, run ccs-codex and trust the user hook in /hooks."
+  say "   Start Codex locally: ccs-codex"
+fi
+say "   Logs: tail -f $LOG"

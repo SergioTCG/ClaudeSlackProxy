@@ -2,27 +2,46 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
 
 jobs:
-  check:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
+      - name: Install test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y jq
       - name: Install dependencies
         run: npm ci
-      - name: Syntax-check JS
+      - name: Audit production dependencies
+        run: npm run audit
+      - name: Syntax-check JavaScript
         run: |
-          for f in daemon/*.mjs channel/*.mjs; do node --check "$f"; done
+          for file in daemon/*.mjs channel/*.mjs scripts/*.mjs spike/*.mjs; do
+            node --check "$file"
+          done
       - name: Test
         run: npm test
+      - name: Check docs and release contracts
+        run: npm run check
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Shellcheck scripts
         run: |
-          sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck -S warning \
-            bin/ccs bin/ccs-consent bin/ccs-codex bin/ccs-spawn \
+            bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
+            bin/ccs-spawn bin/ccs-window \
             hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh

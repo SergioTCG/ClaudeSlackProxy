@@ -4,6 +4,39 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc.1] — 2026-08-14
+
+### Added
+- **Provider-neutral project identity.** ClaudeSlackProxy is now Slack Agent
+  Bridge, with Claude Code and Codex presented as first-class provider adapters.
+- **Provider-selective installation.** Fresh setups may install Claude, Codex,
+  or both; the old flagless installer remains Claude-only.
+- **A documented compatibility contract.** `AGENTS.md`, the migration guide,
+  and automated checks protect existing commands, paths, state, channels, and
+  the live LaunchAgent across the rename.
+
+### Changed
+- The canonical Slack app manifest now lives at `slack/app-manifest.json` and
+  carries provider-neutral metadata. The stale Claude-only YAML manifest was
+  removed so there is one source of truth.
+- Fresh installations and control channels use neutral names. Existing
+  `~/.claudeslackproxy` checkouts and `#claude-code-bridge` channels are reused.
+- The documented Node.js minimum is now 20, matching the Slack SDK runtime
+  requirement instead of the former, inaccurate Node 18 declaration.
+
+### Compatibility
+- `/cc-*`, `/codex-*`, `ccs*`, `CCS_*`, `~/.config/ccs`, stored sessions, and
+  `si.sergej.claudeslackproxy` remain unchanged. No new Slack app, token, or
+  OAuth scope is required.
+
+### Security
+- Updated the MCP SDK, usage tooling, and transitive dependencies; the release
+  dependency tree audits with no known vulnerabilities.
+- The historical Slack spike now requires an explicit test user instead of
+  selecting a workspace member, and it no longer carries a second npm lockfile.
+
+[1.0.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.0.0-rc.1
+
 ## [0.2.28] — 2026-08-14
 
 ### Fixed

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ClaudeSlackProxy daemon. Owns the Socket Mode connection and all bridge logic.
+// Slack Agent Bridge daemon. Owns the Socket Mode connection and bridge logic.
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -19,6 +19,7 @@ import {
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from './providers.mjs'
+import { CONTROL_CHANNEL_NAME, findControlChannel } from './identity.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -1771,7 +1772,7 @@ sm.on('slash_commands', async ({ body, ack }) => {
       USER = body.user_id
       persistOwner(USER)
       log('owner claimed', USER)
-      await respondEphemeral(body, '👑 You own this bridge now. Check your new private #claude-code-bridge channel.')
+      await respondEphemeral(body, '👑 You own this bridge now. Check your private bridge control channel.')
       if (state.control) {
         try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
         await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for Claude Code or \`/codex-\` for Codex; the matching \`-new\` and \`-help\` commands get you started.`).catch(() => {})
@@ -1944,16 +1945,26 @@ setInterval(async () => {
   if (hydratedCodexEffort) saveState(state)
   if (!state.control) {
     try {
-      const c = await web.conversations.create({ name: 'claude-code-bridge', is_private: true })
-      state.control = c.channel.id
+      // Recover either identity before creating anything. This makes a missing
+      // state.control field safe on upgrades and prevents duplicate channels.
+      const existing = await findControlChannel(cursor => web.conversations.list({
+        types: 'private_channel', limit: 200, ...(cursor ? { cursor } : {}),
+      }))
+      if (existing) state.control = existing.id
+      else {
+        const c = await web.conversations.create({ name: CONTROL_CHANNEL_NAME, is_private: true })
+        state.control = c.channel.id
+      }
       if (USER) { // fresh installs are unclaimed; /cc-claim invites the owner later
-        await web.conversations.invite({ channel: c.channel.id, users: USER })
-        await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for Claude Code or `/codex-` for Codex. Start with `/cc-new` or `/codex-new`; use the matching `-help` command for the list.')
+        try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
+        await post(state.control, '🤖 *Bridge online.* Type `/cc-` for Claude Code or `/codex-` for Codex. Start with `/cc-new` or `/codex-new`; use the matching `-help` command for the list.')
       }
     } catch (e) {
       if (e?.data?.error === 'name_taken') {
-        const list = await web.conversations.list({ types: 'private_channel', limit: 200 })
-        state.control = list.channels.find(c => c.name === 'claude-code-bridge')?.id || null
+        const existing = await findControlChannel(cursor => web.conversations.list({
+          types: 'private_channel', limit: 200, ...(cursor ? { cursor } : {}),
+        }))
+        state.control = existing?.id || null
       }
     }
     saveState(state)

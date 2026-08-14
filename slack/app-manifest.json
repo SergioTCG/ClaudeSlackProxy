@@ -1,7 +1,7 @@
 {
   "display_information": {
-    "name": "Clavdivs",
-    "description": "Bidirectional bridge between Slack and local Claude Code or Codex terminal sessions",
+    "name": "Slack Agent Bridge",
+    "description": "Control local Claude Code and Codex sessions from Slack",
     "background_color": "#1a1a2e"
   },
   "features": {

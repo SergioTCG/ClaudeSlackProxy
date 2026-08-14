@@ -1,31 +1,33 @@
 {
-  "name": "claude-slack-proxy",
-  "version": "0.2.28",
-  "description": "Drive local Claude Code and Codex CLI sessions from Slack — a private channel per session, bidirectional.",
+  "name": "slack-agent-bridge",
+  "version": "1.0.0-rc.1",
+  "description": "Control local Claude Code and Codex CLI sessions from Slack with private channels and resumable terminals.",
   "private": true,
   "type": "module",
   "license": "MIT",
   "author": "Sergej Berišaj",
-  "homepage": "https://github.com/SergioTCG/ClaudeSlackProxy",
+  "homepage": "https://github.com/SergioTCG/SlackAgentBridge",
   "repository": {
     "type": "git",
-    "url": "https://github.com/SergioTCG/ClaudeSlackProxy.git"
+    "url": "https://github.com/SergioTCG/SlackAgentBridge.git"
   },
   "bugs": {
-    "url": "https://github.com/SergioTCG/ClaudeSlackProxy/issues"
+    "url": "https://github.com/SergioTCG/SlackAgentBridge/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
+    "audit": "npm audit --omit=dev",
+    "check": "node scripts/check-doc-links.mjs && node scripts/check-branding.mjs",
     "daemon": "node daemon/daemon.mjs",
     "test": "node --test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@slack/socket-mode": "^3.0.0",
     "@slack/web-api": "^8.0.0",
-    "ccusage": "^20.0.18",
+    "ccusage": "^20.0.19",
     "zod": "^4.0.0"
   }
 }
