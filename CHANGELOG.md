@@ -4,6 +4,24 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — 2026-08-14
+
+### Released
+- Renamed the project to **Slack Agent Bridge**, with Claude Code and Codex as
+  first-class providers under their separate `/cc-*` and `/codex-*` commands.
+- Added provider-selective installation, canonical agent/contributor guidance,
+  migration and release runbooks, a single Slack manifest, expanded security
+  documentation, compatibility tests, and Node 20/24 CI.
+- Preserved existing commands, `CCS_*` configuration, state, install paths,
+  control channels, and the historical LaunchAgent identity. Existing Slack
+  apps need no new tokens, scopes, or replacement manifest for this release.
+- Updated the production dependency tree to zero known audit vulnerabilities.
+- Promoted the RC.2 runtime after a live Codex kill → Slack wake → Ghostty/tmux
+  resume canary preserved its channel, dangerous-mode flag, model, and `xhigh`
+  reasoning effort with exactly one daemon connected.
+
+[1.0.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.0.0
+
 ## [1.0.0-rc.2] — 2026-08-14
 
 ### Fixed
