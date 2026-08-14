@@ -4,6 +4,31 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0-rc.1] — 2026-08-14
+
+### Added
+- **Codex usage reporting.** `/codex-usage`, `/codex-usage days [n]`, and
+  `/codex-usage models` use `ccusage`'s provider adapter for session, project,
+  daily, model, token, and cost reports.
+- **Live Codex token status.** The edit-in-place working message now combines
+  hook-derived elapsed time with bounded `ccusage` snapshots, showing per-turn
+  total, output, and reasoning-token deltas as they become available.
+
+### Fixed
+- Topic synchronization reads the existing Slack topic after daemon startup and
+  calls `conversations.setTopic` only when the desired value differs. Concurrent
+  startup updates are serialized per channel, preventing restart-wide topic
+  notifications.
+- Claude usage queries now select `ccusage claude` explicitly, preventing newer
+  unified `ccusage` output from mixing Codex totals into `/cc-usage`.
+
+### Compatibility
+- Existing Slack apps must apply `slack/app-manifest.json` to the same app once
+  to register `/codex-usage`. No OAuth scopes, tokens, channels, configuration,
+  state, hooks, launchers, or LaunchAgent identities change.
+
+[1.2.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.2.0-rc.1
+
 ## [1.1.0] — 2026-08-14
 
 ### Released

@@ -29,6 +29,7 @@
       { "command": "/codex-effort", "description": "Show or set this Codex session's reasoning effort", "usage_hint": "[low | medium | high | xhigh | max | ultra]", "should_escape": false },
       { "command": "/codex-new", "description": "Start a Codex session", "usage_hint": "[folder] [Codex flags]", "should_escape": false },
       { "command": "/codex-status", "description": "Codex session info here, or list Codex sessions", "should_escape": false },
+      { "command": "/codex-usage", "description": "Codex token & cost usage — session here, aggregate in control", "usage_hint": "[days [n] | models]", "should_escape": false },
       { "command": "/codex-flags", "description": "Show or change Codex launch flags", "usage_hint": "[--search] [--model=value]", "should_escape": false },
       { "command": "/codex-update", "description": "Update Codex and restart/resume this session", "should_escape": false },
       { "command": "/codex-stop", "description": "Interrupt this Codex session's running turn", "should_escape": false },

@@ -52,7 +52,8 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Claude inbound messages use its MCP Channel server; hooks mirror lifecycle and
   outbound content. Preserve the channel consent and account-switching paths.
 - Codex inbound messages use tmux; lifecycle hooks provide stable outbound final
-  text and permission decisions. Never parse Codex transcript JSONL.
+  text and permission decisions. Never parse Codex transcript JSONL directly;
+  usage telemetry may enter only through `ccusage`'s public JSON adapter.
 - A provider namespace is authoritative. Reject a command or flag that belongs
   to the other provider before it can mutate a session.
 - Hook handlers must remain quick, bounded, and failure-tolerant. A hook or Slack

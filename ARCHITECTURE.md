@@ -54,7 +54,12 @@ Slack (private channels, Socket Mode)
    <session-id>`, queue the message, and deliver it after reconnection.
 5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
-7. **Mirroring is hook-driven and token-free.** Claude keeps its byte-offset JSONL reader and TUI status/form parser. Codex uses the stable `Stop.last_assistant_message` hook field and never parses its explicitly unstable transcript format. Slack-injected messages are deduped for both.
+7. **Mirroring is hook-driven and token-free.** Claude keeps its byte-offset
+   JSONL reader and TUI status/form parser. Codex uses the stable
+   `Stop.last_assistant_message` hook field; the bridge never parses Codex's
+   explicitly unstable transcript format. Usage and live token counters enter
+   only through `ccusage`'s maintained Codex JSON adapter. Slack-injected
+   messages are deduped for both.
 8. **One control channel** — fresh 1.0 installs use
    `#slack-agent-bridge`; upgrades reuse `#claude-code-bridge`. Its immutable
    channel ID lives in state, so the public rename never creates a duplicate.
@@ -75,7 +80,8 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 | `/cc-status`, `/codex-status` | anywhere | session info here; provider-filtered table from control |
 | `/cc-kill`, `/codex-kill` | matching session or control | end a session in the selected provider namespace |
 | `/cc-health`, `/cc-cleanup`, `/cc-claim` | anywhere | bridge-wide operations, intentionally singular |
-| `/cc-account`, `/cc-usage` | Claude/control | Claude-only subscription and usage reporting |
+| `/cc-usage`, `/codex-usage` | matching session/control | Provider-filtered usage through `ccusage`; Claude also exposes plan limits |
+| `/cc-account` | Claude session/control | Claude-only subscription selection |
 | `/cc-help`, `/codex-help` | anywhere | provider-specific command list |
 
 ## Lifecycle (channel naming: `{repo}-{branch}-{yyyymmdd}-{hhmm}`)
@@ -84,13 +90,15 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - `SessionStart(resume)` → reuse mapped channel, "▶️ resumed".
 - `SessionStart(clear)` → rebind channel to the new session id (same pid), "🧹 cleared".
 - `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".
+- Topic synchronization reads Slack's current value after daemon boot and writes
+  only on a real folder/branch/model/effort change.
 - You may rename channels freely — mapping is by immutable channel id.
 
 ## Known limitations
 
 - Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.
-- Codex exposes stable final-text hooks, not the live whimsical status and TUI
-  structures used by Claude. The bridge deliberately does not parse Codex JSONL.
+- Codex does not expose Claude's whimsical spinner verbs. Its stable working
+  status combines hook timing with bounded `ccusage` token snapshots instead.
 - Ghostty on macOS has no reliable IPC for adding windows to one running app
   instance. Dockless accessory windows are supported; single-icon mode remains
   best-effort.

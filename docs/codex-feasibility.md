@@ -37,8 +37,8 @@ mappings retain their current shape, so activation needs no state migration.
 | Model/reasoning control | Restart/resume with `--model` and `model_reasoning_effort` | Implemented |
 | Model discovery | `codex debug models --bundled` | Implemented |
 | File attachments | Existing Slack download + local-path prompt | Implemented |
-| Live whimsical spinner / question-form scraping | Claude-TUI-specific pane grammar | Not claimed for Codex; a generic working status is shown |
-| Usage/cost report | Existing `ccusage` scans Claude transcripts only | Not wired; use Codex `/usage` |
+| Live working status | Hook timing + bounded `ccusage` snapshots | Implemented with elapsed time and per-turn token deltas; no whimsical verb or TUI scraping |
+| Usage/cost report | `ccusage codex` public JSON output | Implemented through `/codex-usage`, daily, and model reports |
 | Per-session subscription switch | Claude OAuth-token mechanism | Not applicable; Codex uses its current machine login |
 
 ## Why hooks + tmux, not app-server
@@ -51,7 +51,10 @@ provider branch while leaving Claude's MCP Channels integration intact.
 
 Codex documents its transcript path as a convenience rather than a stable wire
 format. The bridge consequently uses `Stop.last_assistant_message` and never
-parses Codex JSONL. This trades mid-turn prose streaming for forward compatibility.
+parses Codex JSONL directly. The bundled, independently maintained `ccusage`
+adapter owns usage-file discovery and exposes normalized JSON to the bridge.
+This trades mid-turn prose streaming for forward compatibility while allowing
+bounded token telemetry.
 
 ## Safety and rollout
 

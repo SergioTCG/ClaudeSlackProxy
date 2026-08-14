@@ -31,7 +31,7 @@ test('Slack manifest has provider-neutral 1.0 metadata', () => {
 })
 
 test('provider-scoped commands have parallel Claude and Codex namespaces', () => {
-  const scoped = ['new', 'model', 'effort', 'status', 'flags', 'update', 'stop', 'kill', 'help']
+  const scoped = ['new', 'model', 'effort', 'status', 'usage', 'flags', 'update', 'stop', 'kill', 'help']
   for (const name of scoped) {
     assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
     assert.ok(names.includes(`/codex-${name}`), `missing /codex-${name}`)
@@ -39,7 +39,7 @@ test('provider-scoped commands have parallel Claude and Codex namespaces', () =>
 })
 
 test('bridge-wide and Claude-only commands are not duplicated under Codex', () => {
-  for (const name of ['claim', 'health', 'cleanup', 'usage', 'account']) {
+  for (const name of ['claim', 'health', 'cleanup', 'account']) {
     assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
     assert.ok(!names.includes(`/codex-${name}`), `unexpected /codex-${name}`)
   }

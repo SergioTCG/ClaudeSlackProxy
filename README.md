@@ -35,12 +35,15 @@ capabilities are identical.
 | Model and reasoning-effort controls | ✓ | ✓ |
 | Approve/deny from Slack in permissioned mode | ✓ | ✓ |
 | Default unattended mode | `--dangerously-skip-permissions` | `--yolo` |
-| Claude subscription switching and `ccusage` | ✓ | — |
+| Live working status with time and token counters | ✓ | ✓ |
+| Token and cost usage via `ccusage` | ✓ | ✓ |
+| Claude subscription switching | ✓ | — |
 | Chrome integration flag | `--chrome` | No direct counterpart |
 | Live web search flag | Provider-managed | `--search` |
 
-Codex output uses stable hook fields and never parses its unstable transcript
-JSONL. Claude retains its MCP Channel and transcript/status integration. See
+Codex output uses stable hook fields and the bridge never parses its unstable
+transcript JSONL directly; usage telemetry is delegated to `ccusage`'s public
+Codex JSON adapter. Claude retains its MCP Channel and transcript/status integration. See
 [the architecture](ARCHITECTURE.md) and the original
 [Claude](docs/claude-feasibility.md) and
 [Codex](docs/codex-feasibility.md) feasibility studies.
@@ -97,11 +100,12 @@ During a safe maintenance window, restart the bridge and launch `sab-codex`.
 In that first Codex session, run `/hooks` and explicitly trust the user hook,
 then exit and launch it again. Hook trust is hash-based and is never bypassed.
 
-Existing apps already configured for `v0.2.28` need no Slack changes for 1.0.
-Older apps that do not have `/codex-*` must apply the canonical
-[Slack app manifest](slack/app-manifest.json) to the **same app** once. This
-does not change tokens or OAuth scopes and never requires a second Slack app.
-Applying it again only updates metadata and command descriptions.
+Apps upgrading to 1.2 must apply the canonical
+[Slack app manifest](slack/app-manifest.json) to the **same app** once to
+register `/codex-usage`. Older apps also receive any other missing `/codex-*`
+commands. This does not change tokens or OAuth scopes and never requires a
+second Slack app. Applying it again only updates command registrations,
+metadata, and descriptions.
 
 ## Use
 
@@ -132,7 +136,8 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 | `/cc-kill [id]` / `/codex-kill [id]` | End the process; keep its resumable channel |
 | `/cc-help` / `/codex-help` | Show commands for that provider |
 | `/cc-account [name]` | Bind a Claude session to a stored Claude subscription |
-| `/cc-usage [days [n] \| models \| limits]` | Claude usage via `ccusage`; use Codex `/usage` locally |
+| `/cc-usage [days [n] \| models \| limits]` | Claude token, cost, model, and plan-limit usage via `ccusage` |
+| `/codex-usage [days [n] \| models]` | Codex session/project or aggregate token and cost usage via `ccusage` |
 | `/cc-health` / `/cc-cleanup` / `/cc-claim` | Bridge-wide operations |
 
 With no explicit Slack flags, `/cc-new` uses
@@ -170,7 +175,8 @@ the environment so bearer tokens never appear in process arguments.
 The public name and canonical launchers changed without replacing the installed
 protocol:
 
-- `/cc-*` and `/codex-*` Slack commands are unchanged.
+- `/cc-*` remains Claude and `/codex-*` remains Codex; 1.2 adds
+  `/codex-usage` without changing either namespace.
 - `sab-cc` and `sab-codex` are canonical; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
 - Existing `~/.claudeslackproxy` installations remain in place.
@@ -183,6 +189,8 @@ protocol:
 See [the 1.0 migration guide](docs/migrating-to-1.0.md) before rolling a live
 installation forward or back. Existing 1.0 installations can follow the
 [1.1 launcher migration](docs/migrating-to-1.1.md) to put `sab-*` on `PATH`.
+For the new Codex usage command and its one-time manifest refresh, see the
+[1.2 migration guide](docs/migrating-to-1.2.md).
 
 ## Operations
 

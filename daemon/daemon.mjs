@@ -20,11 +20,17 @@ import {
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
+import { createTopicSync } from './topic.mjs'
+import {
+  codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus, formatTokens,
+  usageCost, usageDate, usageRows,
+} from './usage.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
 const TEAM = process.env.SLACK_TEAM_ID
 const web = new WebClient(process.env.SLACK_BOT_TOKEN)
+const syncTopic = createTopicSync(web)
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
@@ -189,10 +195,9 @@ async function ensureChannel(session) {
   return ch
 }
 
-// Reactive channel topic: folder · branch · model · effort. Deduped, so Slack is
-// only called when something actually changes. Driven by the statusline feed
-// (model/effort/cwd) plus a live branch check.
-const lastTopic = new Map() // channel → last topic string
+// Reactive channel topic: folder · branch · model · effort. The synchronizer
+// hydrates Slack's existing value after daemon boot, so an unchanged restart
+// does not emit a noisy conversations.setTopic event in every channel.
 const lastTopicAt = new Map() // channel → last rebuild time
 async function updateTopic(session) {
   if (!session.channel) return
@@ -210,10 +215,8 @@ async function updateTopic(session) {
     session.worktree ? 'wt:' + session.worktree : '',
     model, effort,
   ].filter(Boolean).join(' · ')
-  if (topic === lastTopic.get(session.channel)) return
-  lastTopic.set(session.channel, topic)
   if (session.tmux) tmuxTitle(session.tmux, topic) // window title mirrors the channel topic
-  try { await web.conversations.setTopic({ channel: session.channel, topic: topic.slice(0, 250) }) }
+  try { await syncTopic(session.channel, topic) }
   catch (e) { log('setTopic error', e?.data?.error || String(e)) }
 }
 
@@ -360,9 +363,83 @@ function startPoller(session) {
   }, 3000)
   pollers.set(session.id, p)
 }
+
+// Codex does not expose Claude's whimsical spinner metadata through hooks.
+// Build a stable equivalent from hook timing plus ccusage's maintained Codex
+// adapter. The expensive transcript scan is bounded to once every 12 seconds;
+// the Slack timer continues to update every 3 seconds in the same message.
+const codexPollers = new Map() // sid → { timer, baseline, current, ... }
+const CODEX_USAGE_REFRESH_MS = 12000
+
+async function codexUsageForSession(session) {
+  const report = await ccusageJson('codex', 'session', ['--offline', '--no-cost'])
+  return codexTokenSnapshot(codexSessionUsage(report, session.id))
+}
+
+function startCodexPoller(session) {
+  if (codexPollers.has(session.id)) return
+  const p = {
+    timer: null,
+    stopped: false,
+    running: false,
+    last: '',
+    nextUsageAt: 0,
+    baseline: codexTokenSnapshot(session.codexUsageBaseline),
+    current: null,
+  }
+  const tick = async () => {
+    if (p.stopped || p.running || !(session.pid && pidAlive(session.pid))) return
+    p.running = true
+    try {
+      const now = Date.now()
+      if (now >= p.nextUsageAt) {
+        p.nextUsageAt = now + CODEX_USAGE_REFRESH_MS
+        try {
+          p.current = await codexUsageForSession(session)
+          if (p.stopped) return
+          if (!p.baseline) {
+            // A brand-new session has no ccusage row yet. Zero is the correct
+            // baseline there, so its first completed model call still appears
+            // as first-turn usage instead of being swallowed as initialization.
+            p.baseline = p.current || codexTokenSnapshot({})
+            session.codexUsageBaseline = p.baseline
+            saveState(state)
+          }
+        } catch (e) { log('Codex live usage unavailable', String(e?.message || e)) }
+      }
+      if (p.stopped) return
+      const text = formatCodexWorkingStatus({
+        startedAt: session.codexTurnStartedAt,
+        baseline: p.baseline,
+        current: p.current,
+        now,
+      })
+      if (text !== p.last) { p.last = text; await setStatus(session, text) }
+    } finally { p.running = false }
+  }
+  p.timer = setInterval(() => tick().catch(e => log('Codex status poller error', String(e))), 3000)
+  codexPollers.set(session.id, p)
+  tick().catch(e => log('Codex status poller error', String(e)))
+}
+
+function beginCodexTurn(session) {
+  stopPoller(session)
+  session.codexTurnStartedAt = Date.now()
+  delete session.codexUsageBaseline
+  saveState(state)
+  startCodexPoller(session)
+}
+
 function stopPoller(session) {
   const p = pollers.get(session.id)
   if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
+  const codex = codexPollers.get(session.id)
+  if (codex) { codex.stopped = true; clearInterval(codex.timer); codexPollers.delete(session.id) }
+  if (session.codexTurnStartedAt || session.codexUsageBaseline) {
+    delete session.codexTurnStartedAt
+    delete session.codexUsageBaseline
+    saveState(state)
+  }
 }
 const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel === session.channel)
 // Mirror a turn's final assistant text and clear its live status. Called by the
@@ -391,6 +468,7 @@ async function finalizeTurn(session) {
 // Codex exposes the stable final assistant text directly on Stop. Its JSONL
 // transcript is explicitly not a stable hook interface, so never parse it.
 async function finalizeCodexTurn(session, body) {
+  stopPoller(session)
   await clearStatus(session)
   const turnId = body.turn_id || null
   if (turnId && session.lastMirroredTurn === turnId) return
@@ -415,8 +493,20 @@ async function findStatusMessage(channel) {
 }
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
-    if (providerOf(s) !== 'claude') continue // pane parsing below is Claude-TUI-specific
     if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
+    if (providerOf(s) === 'codex') {
+      const ts = await findStatusMessage(s.channel)
+      if (s.codexTurnStartedAt) {
+        if (ts) statusTs.set(s.id, ts)
+        startCodexPoller(s)
+        log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+      } else if (ts) {
+        try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
+      }
+      continue
+    }
+    // The pane grammar below remains Claude-specific. Codex re-adoption above
+    // uses only persisted hook state and ccusage, not terminal or JSONL parsing.
     const pane = await tmuxCapture(s.tmux)
     const spinning = !!extractSpinner(pane)
     const waitingForm = !spinning && !!extractQuestionForm(pane)
@@ -638,7 +728,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else await setStatus(session, '⚙️ Codex is working…')
+    else beginCodexTurn(session)
     return
   }
   if (ev === 'PreToolUse') {
@@ -1132,16 +1222,14 @@ async function refreshCollabPanel(body) {
 }
 
 // ---- usage reporting (ccusage) ----------------------------------------------
-// ccusage (bundled as a dependency) scans the local Claude Code transcripts and
-// prices them. Sessions are keyed by session id; a project's ids are exactly the
-// .jsonl basenames in its ~/.claude/projects/<slug>/ dir, which the daemon
-// already knows via each session's transcript path.
-async function ccusageJson(sub) {
+// Delegate provider transcript discovery and pricing to ccusage. The bridge
+// consumes its public JSON schema and never parses Codex JSONL itself.
+async function ccusageJson(provider, sub, extra = []) {
   const bin = path.join(BRIDGE, 'node_modules', '.bin', 'ccusage')
-  const { stdout } = await execFile(bin, [sub, '--json'], { timeout: 90000, maxBuffer: 32 << 20 })
+  const { stdout } = await execFile(bin, [provider, sub, '--json', ...extra], { timeout: 90000, maxBuffer: 32 << 20 })
   return JSON.parse(stdout)
 }
-const fmtTok = n => n == null ? '—' : n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n))
+const fmtTok = formatTokens
 const fmtUsd = n => n == null ? '—' : '$' + n.toFixed(2)
 const shortModel = m => String(m).replace(/^claude-/, '').replace(/-\d{8}$/, '')
 
@@ -1175,28 +1263,53 @@ const limitFooter = () => {
   return lines ? '\n_' + lines.map(l => `${l.label}: ${Math.round(l.pct)}% (resets ${l.resets})`).join(' · ') + '_' : ''
 }
 
-async function usageDays(channel, nArg) {
+async function usageDays(channel, nArg, provider) {
   const n = Math.min(Math.max(parseInt(nArg, 10) || 7, 1), 14)
-  const j = await ccusageJson('daily')
-  const days = (j.daily || []).slice(-n)
+  const j = await ccusageJson(provider, 'daily')
+  const days = usageRows(j, 'daily').slice(-n)
   if (!days.length) return post(channel, 'No usage data yet.')
   const sum = k => days.reduce((a, d) => a + (d[k] || 0), 0)
+  const cost = rows => rows.reduce((total, row) => total + (usageCost(row) || 0), 0)
+  if (provider === 'codex') {
+    const rows = days.map(d => {
+      const models = Object.keys(d.models || {}).map(shortModel).join(', ') || '—'
+      return `| ${usageDate(d).slice(5)} | ${models} | ${fmtTok(d.inputTokens)} | ${fmtTok(d.outputTokens)} | ${fmtTok(d.reasoningOutputTokens)} | ${fmtTok(d.cacheReadTokens)} | ${fmtTok(d.totalTokens)} | ${fmtUsd(usageCost(d))} |`
+    })
+    return postMd(channel,
+      `*Codex usage by day* — last ${days.length} day(s), all projects\n` +
+      `| Day | Models | In | Out | Reason | Cache R | Total | Cost |\n|---|---|---|---|---|---|---|---|\n` +
+      rows.join('\n') + '\n' +
+      `| Σ | | ${fmtTok(sum('inputTokens'))} | ${fmtTok(sum('outputTokens'))} | ${fmtTok(sum('reasoningOutputTokens'))} | ${fmtTok(sum('cacheReadTokens'))} | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(cost(days))} |`)
+  }
   const rows = days.map(d => {
     const models = [...new Set((d.modelBreakdowns || []).map(b => shortModel(b.modelName)))].join(', ') || '—'
-    return `| ${d.period.slice(5)} | ${models} | ${fmtTok(d.inputTokens)} | ${fmtTok(d.outputTokens)} | ${fmtTok(d.cacheCreationTokens)} | ${fmtTok(d.cacheReadTokens)} | ${fmtTok(d.totalTokens)} | ${fmtUsd(d.totalCost)} |`
+    return `| ${usageDate(d).slice(5)} | ${models} | ${fmtTok(d.inputTokens)} | ${fmtTok(d.outputTokens)} | ${fmtTok(d.cacheCreationTokens)} | ${fmtTok(d.cacheReadTokens)} | ${fmtTok(d.totalTokens)} | ${fmtUsd(usageCost(d))} |`
   })
   return postMd(channel,
-    `*Usage by day* — last ${days.length} day(s), all projects\n` +
+    `*Claude Code usage by day* — last ${days.length} day(s), all projects\n` +
     `| Day | Models | In | Out | Cache W | Cache R | Total | Cost |\n|---|---|---|---|---|---|---|---|\n` +
     rows.join('\n') + '\n' +
-    `| Σ | | ${fmtTok(sum('inputTokens'))} | ${fmtTok(sum('outputTokens'))} | ${fmtTok(sum('cacheCreationTokens'))} | ${fmtTok(sum('cacheReadTokens'))} | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(sum('totalCost'))} |` +
+    `| Σ | | ${fmtTok(sum('inputTokens'))} | ${fmtTok(sum('outputTokens'))} | ${fmtTok(sum('cacheCreationTokens'))} | ${fmtTok(sum('cacheReadTokens'))} | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(cost(days))} |` +
     limitFooter())
 }
 
-async function usageModels(channel) {
-  const j = await ccusageJson('daily')
+async function usageModels(channel, provider) {
+  const j = await ccusageJson(provider, 'daily')
   const agg = {}
-  for (const d of j.daily || []) for (const b of d.modelBreakdowns || []) {
+  if (provider === 'codex') {
+    for (const d of usageRows(j, 'daily')) for (const [model, b] of Object.entries(d.models || {})) {
+      const a = agg[model] ??= { in: 0, out: 0, reason: 0, cr: 0, total: 0 }
+      a.in += b.inputTokens || 0; a.out += b.outputTokens || 0
+      a.reason += b.reasoningOutputTokens || 0; a.cr += b.cacheReadTokens || 0; a.total += b.totalTokens || 0
+    }
+    const rows = Object.entries(agg).sort((a, b) => b[1].total - a[1].total).map(([m, a]) =>
+      `| ${shortModel(m)} | ${fmtTok(a.in)} | ${fmtTok(a.out)} | ${fmtTok(a.reason)} | ${fmtTok(a.cr)} | ${fmtTok(a.total)} |`)
+    if (!rows.length) return post(channel, 'No Codex usage data yet.')
+    return postMd(channel,
+      `*Codex usage by model* — all time, all projects\n` +
+      `| Model | In | Out | Reason | Cache R | Total |\n|---|---|---|---|---|---|\n` + rows.join('\n'))
+  }
+  for (const d of usageRows(j, 'daily')) for (const b of d.modelBreakdowns || []) {
     const a = agg[b.modelName] ??= { in: 0, out: 0, cw: 0, cr: 0, cost: 0 }
     a.in += b.inputTokens || 0; a.out += b.outputTokens || 0
     a.cw += b.cacheCreationTokens || 0; a.cr += b.cacheReadTokens || 0; a.cost += b.cost || 0
@@ -1205,42 +1318,58 @@ async function usageModels(channel) {
     `| ${shortModel(m)} | ${fmtTok(a.in)} | ${fmtTok(a.out)} | ${fmtTok(a.cw)} | ${fmtTok(a.cr)} | ${fmtUsd(a.cost)} |`)
   if (!rows.length) return post(channel, 'No usage data yet.')
   return postMd(channel,
-    `*Usage by model* — all time, all projects\n` +
+    `*Claude Code usage by model* — all time, all projects\n` +
     `| Model | In | Out | Cache W | Cache R | Cost |\n|---|---|---|---|---|---|\n` + rows.join('\n'))
 }
 
-async function usageReport(channel) {
+async function usageReport(channel, provider) {
   const session = channel !== state.control ? sessionByChannel(channel) : null
   if (session) {
-    const dir = path.dirname(session.transcript || '.')
-    let ids = []
-    try { ids = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')).map(f => f.slice(0, -6)) } catch {}
-    if (!ids.length) return post(channel, 'No transcripts found for this project yet.')
-    const j = await ccusageJson('session')
-    const rows = (j.session || []).filter(r => ids.includes(r.period))
+    const j = await ccusageJson(provider, 'session')
+    const all = usageRows(j, 'session')
+    let rows = []
+    let cur = null
+    if (provider === 'codex') {
+      cur = codexSessionUsage(j, session.id)
+      // ccusage's Codex `directory` is the rollout-file date directory, not the
+      // agent cwd. Join through bridge state instead: it already maps known
+      // session ids to their trusted working directories without JSONL parsing.
+      rows = codexProjectUsage(j, state.sessions, session.cwd)
+      if (cur && !rows.includes(cur)) rows.push(cur)
+    } else {
+      const dir = path.dirname(session.transcript || '.')
+      let ids = []
+      try { ids = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')).map(f => f.slice(0, -6)) } catch {}
+      if (!ids.length) return post(channel, 'No transcripts found for this project yet.')
+      rows = all.filter(r => ids.includes(r.sessionId || r.period))
+      cur = rows.find(r => (r.sessionId || r.period) === session.id)
+    }
     if (!rows.length) return post(channel, 'ccusage has no data for this project yet.')
-    const cur = rows.find(r => r.period === session.id)
     const sum = k => rows.reduce((a, r) => a + (r[k] || 0), 0)
-    const models = [...new Set(rows.flatMap(r => r.modelsUsed || []))].join(' · ') || '—'
+    const cost = rows.reduce((a, r) => a + (usageCost(r) || 0), 0)
+    const models = [...new Set(rows.flatMap(r => provider === 'codex' ? Object.keys(r.models || {}) : (r.modelsUsed || [])))].join(' · ') || '—'
     return postMd(channel,
-      `*Usage — ${path.basename(session.cwd)}*\n` +
+      `*${providerLabel(provider)} usage — ${path.basename(session.cwd)}*\n` +
       `| Scope | Tokens | Cost |\n|---|---|---|\n` +
-      `| This session (${session.id.slice(0, 8)}) | ${fmtTok(cur?.totalTokens)} | ${fmtUsd(cur?.totalCost)} |\n` +
-      `| Project, all sessions (${rows.length}) | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(sum('totalCost'))} |\n` +
-      `_Models: ${models}_` + limitFooter())
+      `| This session (${session.id.slice(0, 8)}) | ${fmtTok(cur?.totalTokens)} | ${fmtUsd(usageCost(cur))} |\n` +
+      `| Project, all sessions (${rows.length}) | ${fmtTok(sum('totalTokens'))} | ${fmtUsd(cost)} |\n` +
+      `_Models: ${models}_` + (provider === 'claude' ? limitFooter() : ''))
   }
-  // control channel (or any unmapped channel): aggregate across everything
-  const j = await ccusageJson('daily')
-  const days = j.daily || []
+  // Control channel (or any unmapped channel): aggregate the selected provider.
+  const j = await ccusageJson(provider, 'daily')
+  const days = usageRows(j, 'daily')
   const month = new Date().toISOString().slice(0, 7)
-  const msum = k => days.filter(d => String(d.period).startsWith(month)).reduce((a, r) => a + (r[k] || 0), 0)
+  const monthRows = days.filter(d => usageDate(d).startsWith(month))
+  const msum = k => monthRows.reduce((a, r) => a + (r[k] || 0), 0)
+  const monthCost = monthRows.reduce((a, r) => a + (usageCost(r) || 0), 0)
   const t = j.totals || {}
-  const rows7 = days.slice(-7).map(d => `| ${d.period} | ${fmtTok(d.totalTokens)} | ${fmtUsd(d.totalCost)} |`).join('\n')
+  const rows7 = days.slice(-7).map(d => `| ${usageDate(d)} | ${fmtTok(d.totalTokens)} | ${fmtUsd(usageCost(d))} |`).join('\n')
   return postMd(channel,
-    `*Usage — all projects*\n` +
+    `*${providerLabel(provider)} usage — all projects*\n` +
     `| Day | Tokens | Cost |\n|---|---|---|\n${rows7}\n` +
-    `| This month | ${fmtTok(msum('totalTokens'))} | ${fmtUsd(msum('totalCost'))} |\n` +
-    `| All time | ${fmtTok(t.totalTokens)} | ${fmtUsd(t.totalCost)} |` + limitFooter())
+    `| This month | ${fmtTok(msum('totalTokens'))} | ${fmtUsd(monthCost)} |\n` +
+    `| All time | ${fmtTok(t.totalTokens)} | ${fmtUsd(usageCost(t))} |` +
+    (provider === 'claude' ? limitFooter() : ''))
 }
 
 // ---- per-session subscriptions ----------------------------------------------
@@ -1306,6 +1435,7 @@ async function setCodexSetting(session, name, value) {
   restarting.add(session.id)
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  stopPoller(session)
   await clearStatus(session)
   clearPermissionsForPid(session.pid, 'session restarting')
   session.pid = null
@@ -1319,8 +1449,8 @@ async function setCodexSetting(session, name, value) {
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
-const SESSION_SCOPED_COMMANDS = new Set(['status', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags'])
-const CLAUDE_ONLY_COMMANDS = new Set(['account', 'usage'])
+const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags'])
+const CLAUDE_ONLY_COMMANDS = new Set(['account'])
 const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
 
 function commandHelp(provider) {
@@ -1332,9 +1462,10 @@ function commandHelp(provider) {
       '`/codex-flags [--yolo --search …]` — show or change Codex launch flags (restarts/resumes)\n' +
       '`/codex-stop` — interrupt the running turn\n' +
       '`/codex-status` — session info here, or list Codex sessions from control\n' +
+      '`/codex-usage [days [n] | models]` — Codex token and cost usage\n' +
       '`/codex-kill [here|<id>]` — end a Codex session (channel stays, resumable)\n' +
       '*Bridge-wide commands remain under `/cc-`:* `/cc-health` · `/cc-cleanup` · `/cc-claim`\n' +
-      '_Usage reporting and subscription switching are currently Claude-only._'
+      '_Subscription switching remains Claude-only._'
   }
   return '*Claude Code commands* — type `/cc-` to autocomplete\n' +
     '`/cc-new [folder] [--dsp] [--chrome]` — start a Claude Code session\n' +
@@ -1414,6 +1545,7 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     if (!target) return post(channel, `No matching ${providerLabel(commandProvider)} session — use \`${cmd('kill')}\` in a session channel, or \`${cmd('kill')} <id-prefix>\`.`)
     if (target.tmux) await tmuxKill(target.tmux)
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
+    stopPoller(target)
     await clearStatus(target)
     clearPermissionsForPid(target.pid, 'session ended')
     target.pid = null
@@ -1493,17 +1625,16 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'usage') {
-    const session = channel !== state.control ? sessionByChannel(channel) : null
-    if (session && providerOf(session) === 'codex') {
-      return post(channel, 'Codex usage reporting is not exposed through the bridge yet — run `/usage` in the Codex terminal.')
-    }
     const sub = (rest[0] || '').toLowerCase()
-    if (sub === 'limits') return usageLimits(channel) // instant — no transcript scan
+    if (sub === 'limits') {
+      if (commandProvider === 'codex') return post(channel, 'Codex plan-limit windows are not exposed by ccusage; token and cost reports are available here.')
+      return usageLimits(channel) // instant — no transcript scan
+    }
     await post(channel, '⏳ Crunching transcripts…')
     try {
-      if (sub === 'days' || sub === 'daily') return await usageDays(channel, rest[1])
-      if (sub === 'models') return await usageModels(channel)
-      return await usageReport(channel)
+      if (sub === 'days' || sub === 'daily') return await usageDays(channel, rest[1], commandProvider)
+      if (sub === 'models') return await usageModels(channel, commandProvider)
+      return await usageReport(channel, commandProvider)
     } catch (e) { log('usage error', String(e)); return post(channel, `⚠️ ccusage failed: ${String(e?.message || e).slice(0, 200)}`) }
   }
   if (name === 'account') {
@@ -1898,7 +2029,7 @@ async function selfUpdate(trigger) {
   }
   const after = pkgVersion()
   log(`self-update: v${before} → v${after}; restarting when idle`)
-  for (let i = 0; i < 120 && pollers.size; i++) await sleep(5000) // prefer restarting between turns (≤10 min)
+  for (let i = 0; i < 120 && (pollers.size || codexPollers.size); i++) await sleep(5000) // prefer restarting between turns (≤10 min)
   if (state.control) await post(state.control, `⬆️ *Bridge updated* v${before} → v${after} — restarting the daemon. Sessions keep running.`).catch(() => {})
   setTimeout(() => process.exit(0), 800) // flush the post; launchd (KeepAlive) brings us back on the new code
 }

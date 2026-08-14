@@ -7,7 +7,7 @@
 - [ ] `AGENTS.md`, `CLAUDE.md`, README, architecture, security, and migration
       guide describe the same provider and safety contracts.
 - [ ] `slack/app-manifest.json` is the sole Slack manifest.
-- [ ] `/cc-*` and `/codex-*` command namespaces are complete and unchanged.
+- [ ] `/cc-*` and `/codex-*` command namespaces match the documented release contract.
 - [ ] `sab-cc` and `sab-codex` work, and `ccs` / `ccs-codex` forward all args.
 - [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
       are covered by tests.
@@ -45,6 +45,8 @@
 - [ ] Existing and fresh Codex sessions send and receive Slack messages.
 - [ ] Claude and Codex terminal-close → Slack-prompt → Ghostty-resume works.
 - [ ] Topics include folder, branch, model, and reasoning effort.
+- [ ] Restarting with unchanged metadata does not write channel topics again.
+- [ ] Claude and Codex usage reports, plus live Codex time/token status, work.
 - [ ] File transfer, interrupt, model, effort, flags, and update commands work.
 - [ ] Permission relay is exercised once in a non-dangerous test session.
 - [ ] No duplicate Slack channels appear.

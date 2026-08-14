@@ -29,7 +29,7 @@ requireCheck(!fs.existsSync(path.join(root, 'spike/slack-app-manifest.yaml')), '
 for (const command of manifest.features.slash_commands.map(item => item.command)) {
   requireCheck(readme.includes(`\`${command}`), `README does not document ${command}`)
 }
-for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/migrating-to-1.1.md', 'docs/release-checklist.md']) {
+for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/migrating-to-1.1.md', 'docs/migrating-to-1.2.md', 'docs/release-checklist.md']) {
   requireCheck(fs.existsSync(path.join(root, file)), `missing ${file}`)
 }
 
