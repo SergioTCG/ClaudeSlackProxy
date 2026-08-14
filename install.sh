@@ -220,7 +220,18 @@ if [ "$RELOAD_DAEMON" = 1 ]; then
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  loaded=0
+  for attempt in 1 2 3; do
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+      loaded=1
+      break
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      say "  LaunchAgent bootstrap attempt $attempt failed; retrying in 1s…"
+      sleep 1
+    fi
+  done
+  [ "$loaded" = 1 ] || { say "LaunchAgent failed to load after 3 attempts"; exit 1; }
   say "  loaded LaunchAgent $LABEL"
 else
   say "  left the live LaunchAgent $LABEL untouched"

@@ -4,6 +4,15 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0-rc.2] — 2026-08-14
+
+### Fixed
+- The installer retries the transient macOS launchd bootout/bootstrap race up
+  to three times with a bounded delay. The RC.1 production canary encountered
+  error 5 once and recovered on the next bootstrap attempt.
+
+[1.2.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.2.0-rc.2
+
 ## [1.2.0-rc.1] — 2026-08-14
 
 ### Added

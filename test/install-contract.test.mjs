@@ -30,6 +30,11 @@ test('legacy Codex activation remains a no-restart operation', () => {
   assert.doesNotMatch(codexInstaller, /launchctl/)
 })
 
+test('live daemon reload retries the transient launchd bootstrap race', () => {
+  assert.match(installer, /for attempt in 1 2 3; do[\s\S]*launchctl bootstrap/)
+  assert.match(installer, /LaunchAgent failed to load after 3 attempts/)
+})
+
 test('provider hook installation is idempotent and no-restart is isolated', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-agent-bridge-install-'))
   try {
