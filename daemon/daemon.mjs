@@ -19,7 +19,7 @@ import {
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from './providers.mjs'
-import { CONTROL_CHANNEL_NAME, findControlChannel } from './identity.mjs'
+import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -32,10 +32,9 @@ if (!state.channelTmux) state.channelTmux = {} // channel → tmux name last see
 const BOOT_TS = Date.now()
 
 // A Codex permission request is a held HTTP response and cannot survive a daemon
-// restart. Claude requests use the MCP channel and remain restart-recoverable.
-for (const [rid, request] of Object.entries(state.perms)) {
-  if (request.provider === 'codex') delete state.perms[rid]
-}
+// restart. Claude requests use MCP and remain recoverable only if their PID is
+// still alive. Prune dead entries so status/pollers never wait on stale prompts.
+if (prunePermissionsOnBoot(state.perms, pidAlive)) saveState(state)
 
 // Safety net: a single Slack API error (e.g. posting to an archived channel from
 // a timer) must never crash the long-running daemon.
@@ -661,6 +660,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     stopPoller(session)
     await clearStatus(session)
     if (session.channel && !restarting.has(sid)) await post(session.channel, '💤 *Session ended* — write here to resume it')
+    clearPermissionsForPid(session.pid, 'session ended')
     session.pid = null
     saveState(state)
     return
@@ -669,6 +669,28 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
 
 // ---- permission relay -------------------------------------------------------
 const codexPermissionWaiters = new Map() // short request id → held hook response
+function clearPermissionsForPid(pid, reason = 'session ended') {
+  if (!pid) return 0
+  let cleared = 0
+  for (const [rid, request] of Object.entries(state.perms)) {
+    if (Number(request.pid) !== Number(pid)) continue
+    delete state.perms[rid]
+    const waiter = codexPermissionWaiters.get(rid)
+    if (waiter) {
+      codexPermissionWaiters.delete(rid)
+      clearTimeout(waiter.timer)
+      if (!waiter.res.writableEnded) waiter.res.end('{}')
+    }
+    web.chat.update({
+      channel: request.channel, ts: request.ts,
+      text: `⌛ Permission request closed (${reason})`,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `⌛ *Permission request closed* — ${reason}` } }],
+    }).catch(() => {})
+    cleared++
+  }
+  if (cleared) saveState(state)
+  return cleared
+}
 function permissionId() {
   const alphabet = 'abcdefghijkmnopqrstuvwxyz'
   let id = ''
@@ -868,6 +890,7 @@ async function updateAndRestart(session) {
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   stopPoller(session); await clearStatus(session)
+  clearPermissionsForPid(session.pid, 'session restarting')
   session.pid = null; saveState(state)
   await sleep(1500) // let the old process fully exit before the binary is swapped
   let note = ''
@@ -1238,6 +1261,7 @@ async function switchAccount(session, name) {
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   stopPoller(session); await clearStatus(session)
+  clearPermissionsForPid(session.pid, 'session restarting')
   session.pid = null
   session.account = name || null
   saveState(state)
@@ -1261,6 +1285,7 @@ async function setFlags(session, flags) {
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   stopPoller(session); await clearStatus(session)
+  clearPermissionsForPid(session.pid, 'session restarting')
   session.pid = null
   session.launchFlags = flags.join(' ')
   saveState(state)
@@ -1282,6 +1307,7 @@ async function setCodexSetting(session, name, value) {
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
   await clearStatus(session)
+  clearPermissionsForPid(session.pid, 'session restarting')
   session.pid = null
   saveState(state)
   await sleep(1500)
@@ -1389,6 +1415,7 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     if (target.tmux) await tmuxKill(target.tmux)
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
     await clearStatus(target)
+    clearPermissionsForPid(target.pid, 'session ended')
     target.pid = null
     saveState(state)
     return post(channel, `🛑 Ended session \`${target.id.slice(0, 8)}\` (${path.basename(target.cwd)}). The channel stays — write here to resume.`)
@@ -1883,6 +1910,7 @@ setInterval(async () => {
     if (s.pid && !pidAlive(s.pid)) {
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
       stopPoller(s)
+      clearPermissionsForPid(s.pid, 'session process exited')
       s.pid = null
       try {
         await clearStatus(s)
@@ -1923,6 +1951,7 @@ setInterval(async () => {
     if (s.tmux) await tmuxKill(s.tmux)
     if (s.pid && pidAlive(s.pid)) { try { process.kill(s.pid) } catch {} }
     stopPoller(s); await clearStatus(s)
+    clearPermissionsForPid(s.pid, 'terminal closed')
     s.pid = null; saveState(state)
     if (s.channel && !restarting.has(s.id)) { try { await post(s.channel, '💤 *Session ended* (terminal closed) — write here to resume it') } catch {} }
   }

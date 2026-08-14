@@ -28,3 +28,16 @@ export async function findControlChannel(fetchPage) {
   } while (cursor)
   return selectControlChannel(channels)
 }
+
+// Codex permission responses are held by the daemon process and cannot survive
+// its restart. Claude prompts may survive, but only while their agent PID does.
+export function prunePermissionsOnBoot(permissions = {}, isAlive = () => false) {
+  let pruned = 0
+  for (const [id, request] of Object.entries(permissions)) {
+    if (request?.provider === 'codex' || !request?.pid || !isAlive(request.pid)) {
+      delete permissions[id]
+      pruned++
+    }
+  }
+  return pruned
+}

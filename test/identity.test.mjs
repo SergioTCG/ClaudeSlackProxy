@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   CONTROL_CHANNEL_NAME, CONTROL_CHANNEL_NAMES, LEGACY_CONTROL_CHANNEL_NAMES,
-  PRODUCT_NAME, REPOSITORY_SLUG, findControlChannel, selectControlChannel,
+  PRODUCT_NAME, REPOSITORY_SLUG, findControlChannel, prunePermissionsOnBoot,
+  selectControlChannel,
 } from '../daemon/identity.mjs'
 
 test('1.0 exposes a provider-neutral public identity', () => {
@@ -41,4 +42,15 @@ test('control-channel recovery follows Slack pagination before creating one', as
   })
   assert.deepEqual(cursors, ['', 'page-2'])
   assert.equal(selected.id, 'legacy')
+})
+
+test('boot pruning preserves only live Claude permission prompts', () => {
+  const permissions = {
+    live: { pid: 10, provider: 'claude' },
+    dead: { pid: 20 },
+    codex: { pid: 10, provider: 'codex' },
+    malformed: { tool: 'Bash' },
+  }
+  assert.equal(prunePermissionsOnBoot(permissions, pid => pid === 10), 3)
+  assert.deepEqual(permissions, { live: { pid: 10, provider: 'claude' } })
 })

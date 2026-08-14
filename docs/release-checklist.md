@@ -53,6 +53,6 @@
 - [ ] Rename the GitHub repository only after old-remote migration is ready.
 - [ ] Set the GitHub description and topics.
 - [ ] Push the release branch and wait for CI.
-- [ ] Publish `v1.0.0-rc.1` as a prerelease.
+- [ ] Publish `v1.0.0-rc.N` as a prerelease.
 - [ ] Dogfood the RC before promoting the exact tested commit to `v1.0.0`.
 - [ ] Keep `v0.2.28` and the local backup until final acceptance.

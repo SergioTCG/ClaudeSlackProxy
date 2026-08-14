@@ -4,6 +4,15 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc.2] — 2026-08-14
+
+### Fixed
+- Dead-session permission prompts are pruned at boot and whenever a process is
+  ended or restarted. Live Claude prompts remain restart-recoverable, while
+  Codex's process-bound held responses still expire safely on daemon restart.
+
+[1.0.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.0.0-rc.2
+
 ## [1.0.0-rc.1] — 2026-08-14
 
 ### Added
