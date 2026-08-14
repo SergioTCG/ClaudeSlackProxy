@@ -5,7 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   acceptHookSettings, codexEffortFromArgs, codexEffortFromToml,
-  CODEX_DANGEROUS_FLAG, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor, isPathWithin,
+  CODEX_DANGEROUS_FLAG, codexFlagsWithoutInitialPrompt, codexPermissionDecision,
+  defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from '../daemon/providers.mjs'
@@ -48,6 +49,13 @@ test('provider new-session defaults mirror dangerous-mode aliases', () => {
   assert.deepEqual(defaultNewFlagsFor('codex', { CCS_CODEX_NEW_FLAGS: '--search' }), ['--search'])
 })
 
+test('Codex launch metadata excludes the optional resume prompt', () => {
+  const sid = '019fff4d-9217-7ee1-825d-528aec50a0e9'
+  const flags = `resume --search ${sid} wake from Slack with spaces`
+  assert.equal(codexFlagsWithoutInitialPrompt(flags, sid), `resume --search ${sid}`)
+  assert.equal(codexFlagsWithoutInitialPrompt('--search', sid), '--search')
+})
+
 test('Claude resume args keep legacy behavior', () => {
   assert.deepEqual(resumeArgsFor({
     id: 'abc', launchFlags: '--chrome --continue --effort low', effort: 'high',
@@ -68,6 +76,11 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
   assert.deepEqual(displayFlagsFor({ ...session, launchFlags: 'resume --search thr-123' }), ['--search'])
   assert.deepEqual(resumeArgsFor({ id: 'thr-456', provider: 'codex' }), [
     'resume', CODEX_DANGEROUS_FLAG, 'thr-456',
+  ])
+  assert.deepEqual(resumeArgsFor({ id: 'thr-789', provider: 'codex' }, {
+    initialPrompt: 'wake from Slack\nwith the full message',
+  }), [
+    'resume', CODEX_DANGEROUS_FLAG, 'thr-789', 'wake from Slack\nwith the full message',
   ])
 })
 

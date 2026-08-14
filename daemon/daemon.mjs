@@ -14,8 +14,8 @@ import {
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 import {
-  CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, acceptHookSettings, allowedFlags, codexPermissionDecision,
-  defaultNewFlagsFor, displayFlagsFor,
+  CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, acceptHookSettings, allowedFlags,
+  codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from './providers.mjs'
@@ -593,7 +593,9 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   // after the desired settings were persisted. Never let one roll them back;
   // the replacement SessionStart is allowed to confirm its actual launch values.
   const acceptSettings = acceptHookSettings(ev, restarting.has(sid))
-  if (acceptSettings && flags != null && flags !== '') session.launchFlags = flags
+  if (acceptSettings && flags != null && flags !== '') {
+    session.launchFlags = provider === 'codex' ? codexFlagsWithoutInitialPrompt(flags, sid) : flags
+  }
   if (provider === 'codex' && ev === 'SessionStart') {
     const effort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
     if (effort) session.effort = effort
@@ -731,11 +733,12 @@ function injectToSession(pid, text) {
 // --dangerously-skip-permissions, --chrome, etc. are preserved), minus any
 // resume/continue flags, then add --resume <id>. Sessions launched before flag
 // capture fall back to the operator's usual flags (default: --dsp).
-function resumeArgs(session) {
+function resumeArgs(session, initialPrompt = null) {
   const withMeta = session.effort ? session : { ...session, effort: sessionMeta.get(session.id)?.effort }
   return resumeArgsFor(withMeta, {
     defaultClaudeFlags: process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions',
     defaultCodexFlags: process.env.CCS_CODEX_RESUME_FLAGS || CODEX_DANGEROUS_FLAG,
+    initialPrompt,
   })
 }
 
@@ -781,6 +784,7 @@ async function resurrect(session, text) {
   if (inflight && Date.now() - inflight < 90000) return // already waking; message is queued
   resurrectInFlight.set(session.id, Date.now())
   let up = false
+  let initialPrompt = null
   try {
     const anchored = resumeCwd(session)
     if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
@@ -798,7 +802,22 @@ async function resurrect(session, text) {
       }
     }
     await post(session.channel, '⏳ *Waking this session up on the Mac…*')
-    const args = resumeArgs(session)
+    // Codex does not necessarily emit SessionStart while a resumed TUI is idle.
+    // Waiting for that hook before pasting the wake message therefore deadlocks:
+    // local typing starts the first turn, then the hook finally flushes Slack's
+    // queue. Codex resume accepts an optional PROMPT, so consume exactly the
+    // first queued message into argv; it starts the turn and unlocks SessionStart.
+    // Later messages stay queued and are flushed by the existing hook path.
+    if (provider === 'codex') {
+      const queued = pendingBySid.get(session.id) || []
+      initialPrompt = queued.shift() ?? text ?? null
+      pendingBySid.set(session.id, queued)
+      if (initialPrompt) {
+        rememberInjected(session.id, initialPrompt) // suppress the hook echo; Slack already shows it
+        log('codex resume bootstrapped queued prompt', session.id.slice(0, 8))
+      }
+    }
+    const args = resumeArgs(session, initialPrompt)
     // Spawn and VERIFY the terminal actually materialized (tmux session appears).
     // A wedged Ghostty fails silently — the window never initializes and nothing
     // reports it. On failure: kill the dead attempt, reap aged windowless
@@ -826,7 +845,13 @@ async function resurrect(session, text) {
       '⚠️ *The terminal window never initialized* (Ghostty looks wedged) — I cleaned up and retried without luck. ' +
       'Quit Ghostty on the Mac (or wait a minute) and write here again; your message is queued.')
   } finally {
-    if (!up) resurrectInFlight.delete(session.id)
+    if (!up) {
+      resurrectInFlight.delete(session.id)
+      if (initialPrompt) {
+        const queued = pendingBySid.get(session.id) || []
+        pendingBySid.set(session.id, [initialPrompt, ...queued])
+      }
+    }
   }
 }
 const pendingBySid = new Map()

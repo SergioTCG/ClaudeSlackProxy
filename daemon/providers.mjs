@@ -78,6 +78,19 @@ export function defaultNewFlagsFor(provider, env = process.env) {
   return String(configured).split(/\s+/).filter(Boolean)
 }
 
+// `codex resume [flags] <session-id> [prompt]` may carry the first queued Slack
+// message as its optional prompt. CCS_FLAGS is metadata for future resumes, so
+// persist only through the session-id token; otherwise prompt words become
+// bogus launch flags the next time the conversation wakes.
+export function codexFlagsWithoutInitialPrompt(flags, sessionId) {
+  const raw = String(flags || '')
+  const sid = String(sessionId || '')
+  if (!sid) return raw
+  const escaped = sid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`(^|\\s)${escaped}(?=\\s|$)`).exec(raw)
+  return match ? raw.slice(0, match.index + match[0].length).trim() : raw
+}
+
 export function displayFlagsFor(session) {
   const provider = providerOf(session)
   const toks = String(session?.launchFlags || '').trim().split(/\s+/).filter(Boolean)
@@ -100,6 +113,7 @@ const tomlString = value => JSON.stringify(String(value))
 
 export function resumeArgsFor(session, {
   defaultClaudeFlags = '--dangerously-skip-permissions', defaultCodexFlags = CODEX_DANGEROUS_FLAG,
+  initialPrompt = null,
 } = {}) {
   const provider = providerOf(session)
   const toks = displayFlagsFor(session)
@@ -131,7 +145,9 @@ export function resumeArgsFor(session, {
   if (!keep.length) keep.push(...String(defaultCodexFlags).split(/\s+/).filter(Boolean))
   if (session.model) keep.push('--model', session.model)
   if (session.effort) keep.push('--config', `model_reasoning_effort=${tomlString(session.effort)}`)
-  return ['resume', ...keep, session.id]
+  const args = ['resume', ...keep, session.id]
+  if (initialPrompt) args.push(String(initialPrompt))
+  return args
 }
 
 export function codexPermissionDecision(behavior) {

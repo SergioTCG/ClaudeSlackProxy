@@ -4,6 +4,18 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.28] — 2026-08-14
+
+### Fixed
+- **Slack-triggered Codex resurrection no longer waits for local typing.** An
+  idle `codex resume` can defer `SessionStart`, while the bridge previously
+  waited for that hook before pasting the queued wake message. The first Slack
+  message is now supplied as Codex's optional resume prompt, which starts the
+  turn immediately; subsequent queued messages retain the existing hook-driven
+  flush order.
+
+[0.2.28]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.28
+
 ## [0.2.27] — 2026-08-14
 
 ### Changed

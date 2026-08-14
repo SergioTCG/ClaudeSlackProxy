@@ -26,6 +26,10 @@ Slack (private channels, Socket Mode)
 - **`bin/ccs-codex`** — opt-in Codex launcher. It uses the same tmux invariant, exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does not load Claude's MCP server or consent watcher.
 - **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
 - **`hooks/codex-hook.sh`** — separately registered and gated by `CCS_PROVIDER=codex`. Lifecycle events post to the daemon; `PermissionRequest` waits for a Slack verdict and emits the documented Codex decision JSON. Failure returns no decision, preserving the local approval flow.
+- **Codex resurrection bootstrap** — `codex resume` receives the first queued
+  Slack message through its optional `PROMPT` argument. This starts the first
+  turn even when an idle resumed TUI has not emitted `SessionStart`; later
+  messages remain queued and flush through the normal hook path.
 - **`channel/server.mjs`** — MCP channel server, spawned per session by Claude Code. Declares `claude/channel`, connects outward to the daemon's SSE endpoint keyed by its claude PID, and forwards each pushed Slack message into the session as a channel event. No reply tool: outbound mirroring is done by hooks, so responses are verbatim and cost no extra model turns.
 - **`daemon/daemon.mjs`** (+ `slackout.mjs`, `util.mjs`) — everything else.
 
