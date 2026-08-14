@@ -5,7 +5,7 @@ Drive local [Claude Code](https://claude.com/claude-code) sessions from Slack, w
 It's the missing piece for managing many parallel Claude Code sessions when you're away from your machine — a channel per session, from your phone.
 
 > [!WARNING]
-> **This is remote code execution by design.** Claude sessions run with `--dangerously-skip-permissions` by default; Codex sessions use their configured sandbox/approval policy. Anyone who can post as you in your Slack workspace can steer them. Read [SECURITY.md](SECURITY.md) before installing. Not affiliated with Anthropic or OpenAI.
+> **This is remote code execution by design.** Slack-spawned Claude sessions run with `--dangerously-skip-permissions` by default; Slack-spawned Codex sessions run with `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Anyone who can post as you in your Slack workspace can steer them. Read [SECURITY.md](SECURITY.md) before installing. Not affiliated with Anthropic or OpenAI.
 
 > [!NOTE]
 > **macOS only** (launchd, Ghostty, `open`). The Claude path uses the **Channels** research-preview API via `--dangerously-load-development-channels`; Codex uses lifecycle hooks plus tmux. Linux support (systemd + a terminal-agnostic spawner) is a welcome contribution.
@@ -81,6 +81,19 @@ Commands are native Slack slash commands. `/cc-*` always means Claude Code;
 | `/cc-usage [days [n] \| models \| limits]` | Claude-only token/cost usage via [ccusage](https://github.com/ryoppippi/ccusage); use Codex terminal `/usage` for Codex |
 | `/cc-health` / `/cc-cleanup` / `/cc-claim` | bridge-wide commands; intentionally not duplicated under `/codex-*` |
 | a pending tool prompt (non-`--dsp` sessions) | ✅ Approve / ⛔ Deny buttons, or `yes <id>` / `no <id>` |
+
+With no explicit flags, `/cc-new` defaults to `--dangerously-skip-permissions`
+and `/codex-new` defaults to the canonical
+`--dangerously-bypass-approvals-and-sandbox`; `--yolo` is accepted as its short
+alias and normalized to the canonical form. Explicit flags replace the default.
+The same provider-specific fallback is used when an old session has no launch
+flags to preserve. Override these operator defaults with `CCS_NEW_FLAGS`,
+`CCS_CODEX_NEW_FLAGS`, `CCS_RESUME_FLAGS`, and `CCS_CODEX_RESUME_FLAGS`.
+
+Claude's `--chrome` has no direct Codex CLI flag counterpart. Codex's optional
+`--search` enables live web search (instead of its cached search default), but
+does not control a Chrome browser. Browser automation requires a separately
+configured MCP server or plugin and is not enabled by this bridge.
 
 **Collaborators.** From `/cc-status` or `/codex-status` in its matching session channel, a user-picker lets you allow specific Slack teammates to send prompts to that session (a Remove button revokes them; the current list is shown). Their prompts are injected labelled `[Slack collaborator <name>]`, so the transcript records who said what. Collaborators can send prompts only — not permission verdicts, slash commands, or session resurrection — and only while the session is live. Everything else stays owner-only, and the whitelist is per channel and survives restarts.
 

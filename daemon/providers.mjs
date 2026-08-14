@@ -39,11 +39,14 @@ const CLAUDE_FLAGS = new Set([
 ])
 const CLAUDE_ALIASES = Object.freeze({ '--dsp': '--dangerously-skip-permissions' })
 
+export const CODEX_DANGEROUS_FLAG = '--dangerously-bypass-approvals-and-sandbox'
+const CODEX_ALIASES = Object.freeze({ '--yolo': CODEX_DANGEROUS_FLAG })
+
 // Keep Codex launch flags deliberately narrow. Values use --name=value so Slack
 // tokenization cannot accidentally turn a value into an unvalidated argument.
 const CODEX_FLAGS = new Set([
   '--search', '--no-alt-screen', '--approve-for-me',
-  '--dangerously-bypass-approvals-and-sandbox',
+  CODEX_DANGEROUS_FLAG,
 ])
 const CODEX_VALUE_FLAGS = [
   '--model=', '--sandbox=', '--ask-for-approval=',
@@ -61,10 +64,18 @@ export function normalizeLaunchFlag(provider, flag) {
     const normalized = CLAUDE_ALIASES[raw] || raw
     return CLAUDE_FLAGS.has(normalized.split('=')[0]) ? normalized : null
   }
-  if (CODEX_FLAGS.has(raw)) return raw
-  return CODEX_VALUE_FLAGS.some(prefix => raw.startsWith(prefix) && raw.length > prefix.length)
-    ? raw
+  const normalized = CODEX_ALIASES[raw] || raw
+  if (CODEX_FLAGS.has(normalized)) return normalized
+  return CODEX_VALUE_FLAGS.some(prefix => normalized.startsWith(prefix) && normalized.length > prefix.length)
+    ? normalized
     : null
+}
+
+export function defaultNewFlagsFor(provider, env = process.env) {
+  const configured = provider === 'codex'
+    ? env.CCS_CODEX_NEW_FLAGS || CODEX_DANGEROUS_FLAG
+    : env.CCS_NEW_FLAGS || '--dangerously-skip-permissions'
+  return String(configured).split(/\s+/).filter(Boolean)
 }
 
 export function displayFlagsFor(session) {
@@ -87,7 +98,9 @@ export function displayFlagsFor(session) {
 
 const tomlString = value => JSON.stringify(String(value))
 
-export function resumeArgsFor(session, { defaultClaudeFlags = '--dangerously-skip-permissions', defaultCodexFlags = '' } = {}) {
+export function resumeArgsFor(session, {
+  defaultClaudeFlags = '--dangerously-skip-permissions', defaultCodexFlags = CODEX_DANGEROUS_FLAG,
+} = {}) {
   const provider = providerOf(session)
   const toks = displayFlagsFor(session)
   if (provider === 'claude') {

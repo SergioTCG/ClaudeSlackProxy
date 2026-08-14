@@ -32,7 +32,7 @@ mappings retain their current shape, so activation needs no state migration.
 | Slack prompt → terminal | Existing bracketed tmux paste | Implemented |
 | Final response → Slack | `Stop.last_assistant_message` | Implemented without parsing Codex JSONL |
 | Dormant-session resume | `codex resume <UUID>` in a new Ghostty/tmux window | Implemented |
-| Approve/deny from Slack | Synchronous `PermissionRequest` hook; daemon holds the response until a Slack verdict | Implemented; local prompt is the failure fallback |
+| Approve/deny from Slack | Synchronous `PermissionRequest` hook; daemon holds the response until a Slack verdict | Implemented for non-yolo sessions; local prompt is the failure fallback |
 | Interrupt turn | Launcher binds Codex `interrupt_turn` to F12; daemon sends F12 | Implemented |
 | Model/reasoning control | Restart/resume with `--model` and `model_reasoning_effort` | Implemented |
 | Model discovery | `codex debug models --bundled` | Implemented |
@@ -66,6 +66,10 @@ parses Codex JSONL. This trades mid-turn prose streaming for forward compatibili
   does not alter `~/.codex`.
 - The Codex installer does not restart the daemon. Activation is a deliberate
   maintenance action.
+- To mirror Claude's remote-control posture, flagless Slack spawns default to
+  `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Operators can replace
+  it with explicit sandbox/approval flags or `CCS_CODEX_NEW_FLAGS`; the Slack
+  permission relay applies when Codex is configured to request approval.
 - The permission hook fails open to Codex's ordinary *local approval prompt*,
   not to automatic approval: `{}` means the bridge made no decision.
 - `--dangerously-bypass-hook-trust` is not allowlisted. The operator reviews and

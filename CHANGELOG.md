@@ -4,6 +4,21 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.27] — 2026-08-14
+
+### Changed
+- **Codex now mirrors Claude's remote-spawn default.** Flagless `/codex-new`
+  sessions and resumes without captured launch flags use Codex's canonical
+  `--dangerously-bypass-approvals-and-sandbox`. The documented `--yolo` alias
+  is accepted in Slack commands and normalized to the canonical flag. Explicit
+  flags and `CCS_CODEX_NEW_FLAGS` / `CCS_CODEX_RESUME_FLAGS` still override the
+  default.
+- **Clarified browser capability.** Codex `--search` enables live web search; it
+  is not a counterpart to Claude's `--chrome`. Browser automation still needs
+  a separately configured MCP server or plugin.
+
+[0.2.27]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.27
+
 ## [0.2.26] — 2026-08-14
 
 ### Added

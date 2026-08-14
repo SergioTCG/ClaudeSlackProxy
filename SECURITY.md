@@ -4,8 +4,10 @@
 
 ClaudeSlackProxy is **remote code execution by design**. It bridges a Slack
 workspace to Claude Code or opt-in Codex sessions running on your machine.
-Claude sessions use `--dangerously-skip-permissions` by default; Codex sessions
-use the sandbox and approval policy selected for that session. In plain terms:
+Slack-spawned Claude sessions use `--dangerously-skip-permissions` by default;
+Slack-spawned Codex sessions use
+`--dangerously-bypass-approvals-and-sandbox` (`--yolo`) by default. Explicit
+launch flags replace those defaults. In plain terms:
 
 > **Anyone who can post a message as you in your Slack workspace can run
 > arbitrary commands on your computer, with your filesystem and credentials.**
@@ -42,9 +44,10 @@ your Slack account and workspace, so treat it accordingly.
 - **Understand `--dangerously-skip-permissions`.** Sessions won't prompt before
   running commands or editing files. Use permission relay (approve/deny from
   Slack) for sessions where you want a human in the loop.
-- **Choose Codex flags deliberately.** `--dangerously-bypass-approvals-and-sandbox`
-  removes Codex's local safeguards and makes the Slack-account trust boundary
-  especially important.
+- **Choose Codex flags deliberately.** The Slack-spawn default,
+  `--dangerously-bypass-approvals-and-sandbox`, removes Codex's local safeguards
+  and makes the Slack-account trust boundary especially important. Supply a
+  safer explicit policy when you want Codex's sandbox or Slack approval relay.
 
 ## Dependency on a research-preview feature
 

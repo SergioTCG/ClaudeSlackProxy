@@ -14,7 +14,8 @@ import {
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
 import {
-  CODEX_EFFORTS, acceptHookSettings, allowedFlags, codexPermissionDecision, displayFlagsFor,
+  CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, acceptHookSettings, allowedFlags, codexPermissionDecision,
+  defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from './providers.mjs'
@@ -734,7 +735,7 @@ function resumeArgs(session) {
   const withMeta = session.effort ? session : { ...session, effort: sessionMeta.get(session.id)?.effort }
   return resumeArgsFor(withMeta, {
     defaultClaudeFlags: process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions',
-    defaultCodexFlags: process.env.CCS_CODEX_RESUME_FLAGS || '',
+    defaultCodexFlags: process.env.CCS_CODEX_RESUME_FLAGS || CODEX_DANGEROUS_FLAG,
   })
 }
 
@@ -1264,11 +1265,7 @@ async function setCodexSetting(session, name, value) {
 
 // Flags a provider-specific new session gets when none are given. Configurable because the
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
-const defaultNewFlags = (provider = 'claude') =>
-  (provider === 'codex'
-    ? process.env.CCS_CODEX_NEW_FLAGS || ''
-    : process.env.CCS_NEW_FLAGS || '--dangerously-skip-permissions')
-    .split(/\s+/).filter(Boolean)
+const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
 const SESSION_SCOPED_COMMANDS = new Set(['status', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags'])
 const CLAUDE_ONLY_COMMANDS = new Set(['account', 'usage'])
@@ -1277,10 +1274,10 @@ const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
 function commandHelp(provider) {
   if (provider === 'codex') {
     return '*Codex commands* — type `/codex-` to autocomplete\n' +
-      '`/codex-new [folder] [flags]` — start a Codex session\n' +
+      '`/codex-new [folder] [--yolo] [--search]` — start a Codex session\n' +
       '`/codex-model [m]` · `/codex-effort [e]` — show or set Codex model/reasoning effort\n' +
       '`/codex-update` — update Codex CLI and restart/resume this session\n' +
-      '`/codex-flags [flags…]` — show or change Codex launch flags (restarts/resumes)\n' +
+      '`/codex-flags [--yolo --search …]` — show or change Codex launch flags (restarts/resumes)\n' +
       '`/codex-stop` — interrupt the running turn\n' +
       '`/codex-status` — session info here, or list Codex sessions from control\n' +
       '`/codex-kill [here|<id>]` — end a Codex session (channel stays, resumable)\n' +
@@ -1482,7 +1479,8 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const session = sessionByChannel(channel)
     if (!session) return post(channel, `Use \`${cmd('flags')}\` in a ${providerLabel(commandProvider)} session channel.`)
     const provider = providerOf(session)
-    const allowed = allowedFlags(provider).map(f => `\`${f}\``).join(' · ') + (provider === 'claude' ? ' (`--dsp` works too)' : '')
+    const alias = provider === 'claude' ? ' (`--dsp` works too)' : ' (`--yolo` works too)'
+    const allowed = allowedFlags(provider).map(f => `\`${f}\``).join(' · ') + alias
     if (!rest.length) {
       const cur = displayFlags(session)
       return post(channel, `*Launch flags:* ${cur.length ? '\`' + cur.join(' ') + '\`' : '_none_'}\n` +

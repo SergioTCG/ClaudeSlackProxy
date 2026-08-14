@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   acceptHookSettings, codexEffortFromArgs, codexEffortFromToml,
-  codexPermissionDecision, displayFlagsFor, isPathWithin,
+  CODEX_DANGEROUS_FLAG, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
 } from '../daemon/providers.mjs'
@@ -33,11 +33,19 @@ test('Claude flag normalization preserves the existing alias', () => {
 
 test('Codex flags require an allowlisted switch or inline value', () => {
   assert.equal(normalizeLaunchFlag('codex', '--search'), '--search')
+  assert.equal(normalizeLaunchFlag('codex', '--yolo'), CODEX_DANGEROUS_FLAG)
+  assert.equal(normalizeLaunchFlag('codex', CODEX_DANGEROUS_FLAG), CODEX_DANGEROUS_FLAG)
   assert.equal(normalizeLaunchFlag('codex', '--sandbox=workspace-write'), '--sandbox=workspace-write')
   assert.equal(normalizeLaunchFlag('codex', '--model'), null)
   assert.equal(normalizeLaunchFlag('codex', '--config=features.hooks=false'), null)
   assert.equal(normalizeLaunchFlag('codex', '--add-dir=/'), null)
   assert.equal(normalizeLaunchFlag('codex', '--dangerously-bypass-hook-trust'), null)
+})
+
+test('provider new-session defaults mirror dangerous-mode aliases', () => {
+  assert.deepEqual(defaultNewFlagsFor('claude', {}), ['--dangerously-skip-permissions'])
+  assert.deepEqual(defaultNewFlagsFor('codex', {}), [CODEX_DANGEROUS_FLAG])
+  assert.deepEqual(defaultNewFlagsFor('codex', { CCS_CODEX_NEW_FLAGS: '--search' }), ['--search'])
 })
 
 test('Claude resume args keep legacy behavior', () => {
@@ -58,6 +66,9 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
     '--config', 'model_reasoning_effort="high"', 'thr-123',
   ])
   assert.deepEqual(displayFlagsFor({ ...session, launchFlags: 'resume --search thr-123' }), ['--search'])
+  assert.deepEqual(resumeArgsFor({ id: 'thr-456', provider: 'codex' }), [
+    'resume', CODEX_DANGEROUS_FLAG, 'thr-456',
+  ])
 })
 
 test('Codex effort is recovered from launch overrides and root config only', () => {
