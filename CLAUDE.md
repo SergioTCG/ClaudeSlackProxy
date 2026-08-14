@@ -3,7 +3,7 @@
 Read and follow `AGENTS.md`; it is the canonical repository and release
 contract. This file adds only Claude-specific constraints.
 
-- Preserve the MCP Channel server and
+- Preserve the `sab-cc` launcher, MCP Channel server, and
   `--dangerously-load-development-channels server:slack-bridge` launch path.
 - Do not make Codex hook or tmux behavior the implicit model for Claude. Claude
   retains transcript mirroring, status parsing, consent handling, Chrome flags,

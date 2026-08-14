@@ -4,6 +4,22 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0-rc.1] — 2026-08-14
+
+### Added
+- **Provider-neutral launcher names.** `sab-cc` launches Claude Code and
+  `sab-codex` launches Codex. Daemon-created and resumed sessions use these
+  canonical binaries directly.
+
+### Compatibility
+- `ccs` and `ccs-codex` are silent, argument-preserving aliases and remain
+  supported throughout 1.x. `CCS_*`, `~/.config/ccs`, internal tmux names,
+  Slack commands, hooks, state, tokens, and the LaunchAgent are unchanged.
+- Existing installations need only rerun the provider installer once to add the
+  `sab-*` symlinks to `PATH`; no Slack app or manifest update is required.
+
+[1.1.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.1.0-rc.1
+
 ## [1.0.0] — 2026-08-14
 
 ### Released

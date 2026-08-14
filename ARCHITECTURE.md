@@ -20,13 +20,20 @@ Slack (private channels, Socket Mode)
 │  hooks/hook.sh (global,           channel/server.mjs           │
 │  instant, CCS_BRIDGE-gated)       (per-session MCP subprocess) │
 │         │                          │ notifications/claude/…    │
-│  Ghostty → tmux ─┬→ bin/ccs → Claude + MCP Channel             │
-│                  └→ bin/ccs-codex → Codex + lifecycle hooks    │
+│  Ghostty → tmux ─┬→ bin/sab-cc → Claude + MCP Channel          │
+│                  └→ bin/sab-codex → Codex + lifecycle hooks    │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-- **`bin/ccs`** — the launcher. Replaces `claude` (and any VibeTunnel `vt claude`). Always wraps the session in **tmux inside the terminal window** (terminal invariant preserved; tmux is what makes the session *drivable*), exports `CCS_BRIDGE=1` + `CCS_TMUX=<name>`, then execs `claude --mcp-config <generated> --dangerously-load-development-channels server:slack-bridge [args]`. The MCP config is generated at launch into `~/.config/ccs/mcp.json` with `ccs`'s resolved install path, so nothing is hardcoded.
-- **`bin/ccs-codex`** — opt-in Codex launcher. It uses the same tmux invariant, exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does not load Claude's MCP server or consent watcher.
+- **`bin/sab-cc`** — the Claude launcher. Always wraps the session in **tmux
+  inside the terminal window**, exports `CCS_BRIDGE=1` + `CCS_TMUX=<name>`, then
+  execs `claude --mcp-config <generated>
+  --dangerously-load-development-channels server:slack-bridge [args]`. The MCP
+  config is generated at launch into `~/.config/ccs/mcp.json` with the resolved
+  install path, so nothing is hardcoded. `bin/ccs` forwards to this launcher.
+- **`bin/sab-codex`** — the Codex launcher. It uses the same tmux invariant,
+  exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does
+  not load Claude's MCP server or consent watcher. `bin/ccs-codex` forwards to it.
 - **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
 - **`hooks/codex-hook.sh`** — separately registered and gated by `CCS_PROVIDER=codex`. Lifecycle events post to the daemon; `PermissionRequest` waits for a Slack verdict and emits the documented Codex decision JSON. Failure returns no decision, preserving the local approval flow.
 - **Codex resurrection bootstrap** — `codex resume` receives the first queued
@@ -41,7 +48,10 @@ Slack (private channels, Socket Mode)
 1. **Message-level bridge, not pty mirroring** — immune to TUI resize bugs (feasibility finding).
 2. **JSON state file, not SQLite** — single-writer daemon, dozens of rows, human-inspectable, atomic tmp+rename. (Revised from the earlier SQLite suggestion; complexity wasn't buying anything.)
 3. **Provider + PID is the live join key.** Hooks report their parent PID; the daemon walks ancestry to the owning `claude` or `codex` process. Claude's channel SSE also joins by PID. Persisted identity remains the raw session ID, with missing provider fields interpreted as Claude for backward compatibility.
-4. **No archiving, ever** (design v2). Ended sessions → channel gets "💤 write here to resume". Message into a dormant channel → daemon spawns Ghostty+tmux+`ccs --resume <session-id>` in the stored cwd, queues the message, delivers it once the channel server reconnects.
+4. **No archiving, ever** (design v2). Ended sessions → channel gets "💤 write
+   here to resume". A dormant-channel message makes the daemon spawn
+   Ghostty+tmux with `sab-cc --resume <session-id>` or `sab-codex resume
+   <session-id>`, queue the message, and deliver it after reconnection.
 5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
 7. **Mirroring is hook-driven and token-free.** Claude keeps its byte-offset JSONL reader and TUI status/form parser. Codex uses the stable `Stop.last_assistant_message` hook field and never parses its explicitly unstable transcript format. Slack-injected messages are deduped for both.

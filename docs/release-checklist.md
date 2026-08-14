@@ -8,6 +8,7 @@
       guide describe the same provider and safety contracts.
 - [ ] `slack/app-manifest.json` is the sole Slack manifest.
 - [ ] `/cc-*` and `/codex-*` command namespaces are complete and unchanged.
+- [ ] `sab-cc` and `sab-codex` work, and `ccs` / `ccs-codex` forward all args.
 - [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
       are covered by tests.
 - [ ] No secrets, local state, logs, or generated files are tracked.
@@ -53,6 +54,6 @@
 - [ ] Rename the GitHub repository only after old-remote migration is ready.
 - [ ] Set the GitHub description and topics.
 - [ ] Push the release branch and wait for CI.
-- [ ] Publish `v1.0.0-rc.N` as a prerelease.
-- [ ] Dogfood the RC before promoting the exact tested commit to `v1.0.0`.
-- [ ] Keep `v0.2.28` and the local backup until final acceptance.
+- [ ] Publish `vX.Y.Z-rc.N` as a prerelease.
+- [ ] Dogfood the RC before promoting the exact tested commit to `vX.Y.Z`.
+- [ ] Keep the previous release tag and local backup until final acceptance.

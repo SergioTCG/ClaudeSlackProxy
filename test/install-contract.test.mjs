@@ -14,13 +14,15 @@ test('installer accepts provider-selective setup without side effects for help',
   assert.match(run.stdout, /claude\|codex\|both/)
 })
 
-test('1.0 installer preserves installed runtime identities', () => {
+test('installer preserves installed runtime identities', () => {
   assert.match(installer, /\.claudeslackproxy/)
   assert.match(installer, /\.config\/ccs/)
   assert.match(installer, /si\.sergej\.claudeslackproxy/)
   assert.match(installer, /SergioTCG\/SlackAgentBridge/)
   assert.match(installer, /slack\/app-manifest\.json/)
   assert.match(installer, /Node >= 20 required/)
+  assert.match(installer, /bin\/sab-cc/)
+  assert.match(installer, /bin\/sab-codex/)
 })
 
 test('legacy Codex activation remains a no-restart operation', () => {
@@ -75,6 +77,10 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     }
     assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs-codex')).isSymbolicLink())
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-cc')).isSymbolicLink())
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-codex')).isSymbolicLink())
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), path.resolve('bin/sab-cc'))
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-codex')), path.resolve('bin/sab-codex'))
     assert.equal(fs.existsSync(path.join(temp, 'Library/LaunchAgents')), false)
   } finally {
     fs.rmSync(temp, { recursive: true, force: true })

@@ -113,15 +113,18 @@ fi
 mkdir -p "$BIN_DIR"
 ln -sf "$BRIDGE/bin/ccs-spawn" "$BIN_DIR/ccs-spawn"
 if wants_claude; then
+  ln -sf "$BRIDGE/bin/sab-cc" "$BIN_DIR/sab-cc"
   ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
   ln -sf "$BRIDGE/bin/ccs-account" "$BIN_DIR/ccs-account"
-  say "  linked $BIN_DIR/ccs"
+  say "  linked $BIN_DIR/sab-cc (with ccs compatibility alias)"
 fi
 if wants_codex; then
+  ln -sf "$BRIDGE/bin/sab-codex" "$BIN_DIR/sab-codex"
   ln -sf "$BRIDGE/bin/ccs-codex" "$BIN_DIR/ccs-codex"
-  say "  linked $BIN_DIR/ccs-codex"
+  say "  linked $BIN_DIR/sab-codex (with ccs-codex compatibility alias)"
 fi
-chmod +x "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
+chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex \
+  "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
   "$BRIDGE"/bin/ccs-window "$BRIDGE"/bin/ccs-spawn "$BRIDGE"/bin/ccs-account \
   "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \
   "$BRIDGE"/daemon/daemon.mjs "$BRIDGE"/channel/server.mjs 2>/dev/null || true
@@ -226,9 +229,9 @@ fi
 say ""
 say "✅ Slack Agent Bridge files installed for: $INSTALL_PROVIDER"
 say "   Claim a fresh bridge in Slack with /cc-claim."
-if wants_claude; then say "   Start Claude locally: ccs"; fi
+if wants_claude; then say "   Start Claude locally: sab-cc"; fi
 if wants_codex; then
-  say "   Before the first Codex session, run ccs-codex and trust the user hook in /hooks."
-  say "   Start Codex locally: ccs-codex"
+  say "   Before the first Codex session, run sab-codex and trust the user hook in /hooks."
+  say "   Start Codex locally: sab-codex"
 fi
 say "   Logs: tail -f $LOG"

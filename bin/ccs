@@ -1,10 +1,7 @@
 #!/bin/bash
-# ccs — bridged Claude Code launcher.
-# Wraps the session in tmux (daemon needs send-keys for consent + ./model),
-# marks it for the bridge hooks, and loads the Slack channel plugin.
+# Compatibility alias for the pre-1.1 Claude launcher name.
+set -e
 
-# Resolve BRIDGE from this script's real location, following symlinks (ccs is
-# usually symlinked onto PATH). macOS has no `readlink -f`, so walk the chain.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -12,67 +9,4 @@ while [ -h "$SOURCE" ]; do
   [ "${SOURCE:0:1}" != "/" ] && SOURCE="$DIR/$SOURCE"
 done
 BRIDGE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
-# Bare login shells (scripts, Ghostty -e) and daemon-created tmux sessions may
-# lack Homebrew or ~/.local/bin on PATH — without tmux the self-wrap silently
-# degrades, and without claude (native install lives in ~/.local/bin) the exec
-# fails outright ("claude: not found" killed every daemon spawn after claude's
-# updater removed its old /opt/homebrew shim).
-command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
-export CCS_BRIDGE=1
-export CCS_FLAGS="$*"   # launch flags, so the daemon can replay them on resume
-# Never trust an inherited CCS_TMUX: env leaks (open/Ghostty windows spawned
-# from a bridged shell) made new sessions claim ANOTHER session's tmux, so
-# Slack messages for them were pasted into the wrong terminal. The self-wrap
-# sets its own name; the in-tmux path derives it below.
-unset CCS_TMUX
-# Shed any inherited Claude identity: a shell descended from a bridged session
-# carries CLAUDE_CODE_CHILD_SESSION / CLAUDE_CODE_SESSION_ID / CLAUDE_PID, and a
-# claude launched with those believes it's a CHILD of that session — it then
-# writes no transcript of its own, breaking resume and Slack mirroring entirely.
-unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_PID \
-      CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDECODE 2>/dev/null || true
-
-if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
-  TN="ccs-$$-$RANDOM"
-  q=""
-  for a in "$@"; do q+="$(printf '%q' "$a") "; done
-  # Auto-dismiss the trust / dev-channels dialogs so the session comes up clean.
-  "$BRIDGE/bin/ccs-consent" "$TN" >/dev/null 2>&1 &
-  exec tmux new-session -s "$TN" \
-    "CCS_BRIDGE=1 CCS_TMUX=$TN${CCS_ACCOUNT:+ CCS_ACCOUNT=$CCS_ACCOUNT} $(printf '%q' "$SOURCE") $q"
-fi
-
-# Running inside an existing tmux session (no self-wrap): derive the session
-# name so the daemon can drive this pane — with CCS_TMUX empty the channel still
-# gets created, but Slack→terminal injection and /cc-stop silently target nothing.
-if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
-  CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
-  export CCS_TMUX
-fi
-
-# Per-session subscription: CCS_ACCOUNT names an entry in the 0600 accounts file
-# (see bin/ccs-account). Resolve it to a token HERE — never on the command line,
-# because `ps` shows every process's argv to every user on the machine. An
-# explicit CLAUDE_CODE_OAUTH_TOKEN in the environment always wins.
-if [ -n "${CCS_ACCOUNT:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  _acct_tok="$(grep -m1 "^${CCS_ACCOUNT}=" "$CONFIG_DIR/accounts" 2>/dev/null | cut -d= -f2-)"
-  if [ -n "$_acct_tok" ]; then
-    export CLAUDE_CODE_OAUTH_TOKEN="$_acct_tok"
-  else
-    echo "ccs: unknown account '$CCS_ACCOUNT' — falling back to this machine's Claude login" >&2
-  fi
-  unset _acct_tok
-fi
-
-# Generate the channel MCP config with the resolved server path (no hardcoding).
-mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_DIR/mcp.json" <<EOF
-{ "mcpServers": { "slack-bridge": { "command": "node", "args": ["$BRIDGE/channel/server.mjs"] } } }
-EOF
-
-exec claude \
-  --mcp-config "$CONFIG_DIR/mcp.json" \
-  --dangerously-load-development-channels server:slack-bridge \
-  "$@"
+exec "$BRIDGE/bin/sab-cc" "$@"

@@ -12,8 +12,8 @@ layer already supplies the missing inbound transport and terminal control.
 The safe design is a provider adapter, not a rewrite:
 
 ```text
-Slack → daemon → tmux paste ─┬→ bin/ccs       → Claude Code
-                             └→ bin/ccs-codex → Codex CLI
+Slack → daemon → tmux paste ─┬→ bin/sab-cc    → Claude Code
+                             └→ bin/sab-codex → Codex CLI
 
 Claude → hooks + JSONL transcript + MCP Channel SSE → daemon → Slack
 Codex  → lifecycle hooks (final text included)      → daemon → Slack
@@ -55,9 +55,10 @@ parses Codex JSONL. This trades mid-turn prose streaming for forward compatibili
 
 ## Safety and rollout
 
-- `bin/ccs`, `hooks/hook.sh`, Claude MCP Channels, and old state records keep
-  their existing behavior.
-- Codex is selected only by `ccs-codex`, `/codex-new <folder>`, or
+- `bin/sab-cc`, `hooks/hook.sh`, Claude MCP Channels, and old state records keep
+  their existing behavior. The historical `ccs` command remains an alias.
+- Codex is selected only by `sab-codex` (or its `ccs-codex` alias),
+  `/codex-new <folder>`, or
   `POST /spawn` with `provider: "codex"`.
 - Slack ingress is namespaced: `/cc-*` is always Claude and `/codex-*` is
   always Codex. Provider flags in slash commands are rejected, and a command
@@ -77,9 +78,9 @@ parses Codex JSONL. This trades mid-turn prose streaming for forward compatibili
   requires.
 
 Rollback is similarly narrow: stop starting Codex sessions, remove the
-`ccs-codex` symlink and the exact hook entries from `~/.codex/hooks.json`, then
-restart the daemon during a safe window. Claude sessions and state need no
-conversion.
+`sab-codex` and `ccs-codex` symlinks and the exact hook entries from
+`~/.codex/hooks.json`, then restart the daemon during a safe window. Claude
+sessions and state need no conversion.
 
 ## Residual risks
 

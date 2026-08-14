@@ -1,0 +1,37 @@
+#!/bin/bash
+# sab-codex — Slack Agent Bridge launcher for Codex CLI.
+# It deliberately does not load Claude's MCP Channel server or consent watcher.
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE:0:1}" != "/" ] && SOURCE="$DIR/$SOURCE"
+done
+
+command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v codex >/dev/null 2>&1 || PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+
+export CCS_BRIDGE=1
+export CCS_PROVIDER=codex
+export CCS_FLAGS="$*"
+unset CCS_TMUX
+# Do not inherit a parent Codex thread identity into a new bridged terminal.
+# Authentication/config variables such as CODEX_HOME remain intact.
+unset CODEX_THREAD_ID CODEX_TURN_ID CODEX_SESSION_ID 2>/dev/null || true
+
+if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
+  TN="ccs-codex-$$-$RANDOM"
+  q=""
+  for a in "$@"; do q+="$(printf '%q' "$a") "; done
+  exec tmux new-session -s "$TN" \
+    "CCS_BRIDGE=1 CCS_PROVIDER=codex CCS_TMUX=$TN $(printf '%q' "$SOURCE") $q"
+fi
+
+if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
+  CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
+  export CCS_TMUX
+fi
+
+# F12 gives the bridge an unambiguous interrupt key that cannot exit an idle TUI.
+exec codex -c 'tui.keymap.chat.interrupt_turn="f12"' "$@"

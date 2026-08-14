@@ -327,10 +327,10 @@ export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$
 
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, account, provider = 'claude' }) {
   const acct = provider === 'claude' ? safeAccount(account) : null
-  const launcher = provider === 'codex' ? 'ccs-codex' : 'ccs'
-  // Only the NAME travels in the command line (ps is world-readable); `ccs`
+  const launcher = provider === 'codex' ? 'sab-codex' : 'sab-cc'
+  // Only the NAME travels in the command line (ps is world-readable); `sab-cc`
   // resolves it to the token from the 0600 accounts file.
-  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${provider === 'codex' ? ' CCS_PROVIDER=codex' : ''}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', launcher))} ${args.map(shq).join(' ')}`
+  const launcherCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${provider === 'codex' ? ' CCS_PROVIDER=codex' : ''}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', launcher))} ${args.map(shq).join(' ')}`
   if (process.env.CCS_GHOSTTY_SINGLE === '1') {
     // Single-icon mode: the daemon owns the tmux session (created detached);
     // windows are just viewports requested from the one bridge instance.
@@ -342,7 +342,7 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
     fs.mkdirSync(cwd, { recursive: true })
     let ready = false
     for (let attempt = 1; attempt <= 2 && !ready; attempt++) {
-      await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, ccsCmd])
+      await execFile('tmux', ['new-session', '-d', '-s', tmuxName, '-c', cwd, launcherCmd])
       log('spawned detached tmux', { cwd, args, tmuxName, attempt })
       if (autoConsent) {
         const c = spawn(path.join(BRIDGE, 'bin', 'ccs-consent'), [tmuxName], { detached: true, stdio: 'ignore' })
@@ -373,7 +373,7 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
     }
     if (autoConsent) return // consent watcher already launched per attempt
   } else {
-    const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(ccsCmd)}`
+    const inner = `mkdir -p ${shq(cwd)} && cd ${shq(cwd)} && exec tmux new-session -s ${shq(tmuxName)} ${shq(launcherCmd)}`
     // One Ghostty process per window. --quit-after-last-window-closed makes the
     // instance exit when its window closes, so ended sessions don't pile up as
     // windowless instances (enough of those and new windows fail to initialize).

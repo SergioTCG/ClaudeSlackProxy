@@ -13,7 +13,7 @@ const failures = []
 const requireCheck = (condition, message) => { if (!condition) failures.push(message) }
 
 requireCheck(pkg.name === 'slack-agent-bridge', 'package name is not provider-neutral')
-requireCheck(/^1\.0\.0(?:-rc\.\d+)?$/.test(pkg.version), 'package version is not a 1.0 release')
+requireCheck(/^1\.\d+\.\d+(?:-rc\.\d+)?$/.test(pkg.version), 'package version is not a 1.x release')
 requireCheck(pkg.repository.url.endsWith('/SlackAgentBridge.git'), 'package repository URL is stale')
 requireCheck(pkg.engines.node === '>=20', 'package Node minimum does not match Slack SDK requirements')
 requireCheck(readme.startsWith('# Slack Agent Bridge\n'), 'README title is stale')
@@ -22,12 +22,14 @@ requireCheck(manifest.features.bot_user.display_name === 'Clavdivs', 'bot person
 requireCheck(installer.includes('SergioTCG/SlackAgentBridge.git'), 'installer clone URL is stale')
 requireCheck(installer.includes('.claudeslackproxy'), 'installer lost legacy checkout detection')
 requireCheck(installer.includes('si.sergej.claudeslackproxy'), 'installer lost the compatible LaunchAgent label')
+requireCheck(readme.includes('`sab-cc`') && readme.includes('`sab-codex`'), 'README does not document canonical launchers')
+requireCheck(readme.includes('`ccs`') && readme.includes('`ccs-codex`'), 'README lost compatibility aliases')
 requireCheck(!fs.existsSync(path.join(root, 'spike/slack-app-manifest.yaml')), 'stale YAML manifest still exists')
 
 for (const command of manifest.features.slash_commands.map(item => item.command)) {
   requireCheck(readme.includes(`\`${command}`), `README does not document ${command}`)
 }
-for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/release-checklist.md']) {
+for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/migrating-to-1.1.md', 'docs/release-checklist.md']) {
   requireCheck(fs.existsSync(path.join(root, file)), `missing ${file}`)
 }
 

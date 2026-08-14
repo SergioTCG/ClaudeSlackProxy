@@ -93,7 +93,7 @@ The compatibility installer stages Codex without restarting the live daemon:
 ./install-codex.sh
 ```
 
-During a safe maintenance window, restart the bridge and launch `ccs-codex`.
+During a safe maintenance window, restart the bridge and launch `sab-codex`.
 In that first Codex session, run `/hooks` and explicitly trust the user hook,
 then exit and launch it again. Hook trust is hash-based and is never bypassed.
 
@@ -108,9 +108,12 @@ Applying it again only updates metadata and command descriptions.
 Start a bridged terminal locally:
 
 ```bash
-ccs [Claude flags]
-ccs-codex [Codex flags]
+sab-cc [Claude flags]
+sab-codex [Codex flags]
 ```
+
+The pre-1.1 commands `ccs` and `ccs-codex` remain silent compatibility aliases
+throughout the 1.x release line.
 
 A private channel named from the repository, branch, and timestamp appears and
 you are invited. You may rename it; the bridge stores the immutable channel ID.
@@ -162,11 +165,13 @@ Use `/cc-account tina` in a Claude session or start one with
 `~/.config/ccs/accounts` with mode `0600`; the launcher resolves them through
 the environment so bearer tokens never appear in process arguments.
 
-## Upgrade from ClaudeSlackProxy
+## Compatibility and upgrades
 
-Version 1.0 changes the public name, not the installed protocol:
+The public name and canonical launchers changed without replacing the installed
+protocol:
 
-- `/cc-*`, `/codex-*`, `ccs`, and `ccs-codex` are unchanged.
+- `/cc-*` and `/codex-*` Slack commands are unchanged.
+- `sab-cc` and `sab-codex` are canonical; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
 - Existing `~/.claudeslackproxy` installations remain in place.
 - `si.sergej.claudeslackproxy` remains the sole LaunchAgent label.
@@ -176,7 +181,8 @@ Version 1.0 changes the public name, not the installed protocol:
   forks are left untouched.
 
 See [the 1.0 migration guide](docs/migrating-to-1.0.md) before rolling a live
-installation forward or back.
+installation forward or back. Existing 1.0 installations can follow the
+[1.1 launcher migration](docs/migrating-to-1.1.md) to put `sab-*` on `PATH`.
 
 ## Operations
 

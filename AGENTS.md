@@ -15,7 +15,10 @@ These public interfaces are compatibility-sensitive:
 - `/cc-*` always selects Claude Code; `/codex-*` always selects Codex.
 - Missing `session.provider` means Claude. Never bulk-migrate old state merely
   to make provider fields explicit.
-- `ccs`, `ccs-codex`, `ccs-account`, `ccs-spawn`, and `CCS_*` remain stable.
+- `sab-cc` and `sab-codex` are the canonical provider launchers. `ccs` and
+  `ccs-codex` remain compatibility aliases throughout 1.x.
+- `ccs-account`, `ccs-spawn`, internal `ccs-*` tmux names, and `CCS_*` remain
+  stable until a separately designed migration justifies changing them.
 - Configuration and state remain in `~/.config/ccs`; the local HTTP port remains
   `8877` unless an explicit migration is designed and documented.
 - The historical LaunchAgent label `si.sergej.claudeslackproxy` remains the one
@@ -91,7 +94,8 @@ npm run audit
 npm test
 npm run check
 for file in daemon/*.mjs channel/*.mjs scripts/*.mjs; do node --check "$file"; done
-shellcheck -S warning bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
+shellcheck -S warning bin/sab-cc bin/sab-codex \
+  bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
   bin/ccs-spawn bin/ccs-window hooks/hook.sh hooks/codex-hook.sh \
   install.sh install-codex.sh
 ```

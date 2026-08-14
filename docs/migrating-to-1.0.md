@@ -7,7 +7,9 @@ in-place: it does not rename the installed protocol or create another Slack app.
 ## What remains unchanged
 
 - Slack commands: `/cc-*` and `/codex-*`
-- Local commands: `ccs`, `ccs-codex`, `ccs-account`, and `ccs-spawn`
+- Local commands at 1.0: `ccs`, `ccs-codex`, `ccs-account`, and `ccs-spawn`.
+  Starting in 1.1, `sab-cc` and `sab-codex` are canonical while the first two
+  remain compatibility aliases.
 - Environment variables: `CCS_*`
 - Configuration and state: `~/.config/ccs`
 - Local daemon port: `8877`
