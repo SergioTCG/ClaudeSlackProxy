@@ -7,12 +7,17 @@ import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 import {
   BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState,
-  resolveClaudePid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
+  resolveClaudePid, resolveAgentPid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle, safeAccount,
   requestBridgeWindow,
 } from './util.mjs'
 import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
+import {
+  CODEX_EFFORTS, acceptHookSettings, allowedFlags, codexPermissionDecision, displayFlagsFor,
+  isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
+  providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
+} from './providers.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -23,6 +28,12 @@ if (!state.perms) state.perms = {} // open permission prompts, survive daemon re
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
 if (!state.channelTmux) state.channelTmux = {} // channel → tmux name last seen owning it (rebinding aid)
 const BOOT_TS = Date.now()
+
+// A Codex permission request is a held HTTP response and cannot survive a daemon
+// restart. Claude requests use the MCP channel and remain restart-recoverable.
+for (const [rid, request] of Object.entries(state.perms)) {
+  if (request.provider === 'codex') delete state.perms[rid]
+}
 
 // Safety net: a single Slack API error (e.g. posting to an archived channel from
 // a timer) must never crash the long-running daemon.
@@ -45,9 +56,6 @@ function consumeInjected(sid, prompt) {
   if (i >= 0) { a.splice(i, 1); return true }
   return false
 }
-const ALLOWED_FLAGS = new Set(['--dangerously-skip-permissions', '--chrome', '--continue', '--model', '--effort'])
-const FLAG_ALIAS = { '--dsp': '--dangerously-skip-permissions' }
-
 // ---- Claude Code binary: version, update, model list ------------------------
 const restarting = new Set() // session ids intentionally restarting (suppress the "ended" notice)
 function claudeBin() {
@@ -57,6 +65,17 @@ function claudeBin() {
 async function claudeVersion() {
   try { return (await execFile(claudeBin(), ['--version'])).stdout.trim().split(/\s+/)[0] } catch { return '?' }
 }
+function codexBin() {
+  const homebrew = '/opt/homebrew/bin/codex'
+  return fs.existsSync(homebrew) ? homebrew : 'codex'
+}
+async function codexVersion() {
+  try {
+    const out = (await execFile(codexBin(), ['--version'])).stdout.trim()
+    return out.match(/\b\d+\.\d+\.\d+\b/)?.[0] || out || '?'
+  } catch { return '?' }
+}
+const agentVersion = provider => provider === 'codex' ? codexVersion() : claudeVersion()
 let modelCache = { key: null, list: [] }
 async function getModels() {
   const bin = claudeBin()
@@ -65,6 +84,24 @@ async function getModels() {
   const list = await availableModels(bin)
   if (list.length) modelCache = { key, list } // keyed by version path; refreshes after an update
   return list
+}
+let codexModelCache = null
+async function getCodexModels() {
+  if (codexModelCache) return codexModelCache
+  try {
+    const { stdout } = await execFile(codexBin(), ['debug', 'models', '--bundled'], {
+      timeout: 15000, maxBuffer: 32 << 20,
+    })
+    const parsed = JSON.parse(stdout)
+    codexModelCache = (parsed.models || []).filter(m => m.visibility !== 'hide').map(m => ({
+      alias: m.slug, id: m.slug, name: m.display_name || m.slug,
+      efforts: (m.supported_reasoning_levels || []).map(e => e.effort),
+    }))
+    return codexModelCache
+  } catch (e) {
+    log('codex model catalog unavailable', String(e?.message || e))
+    return []
+  }
 }
 const PERM_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
@@ -145,7 +182,9 @@ async function ensureChannel(session) {
   saveState(state)
   try { await web.conversations.invite({ channel: ch, users: USER }) } catch {}
   await updateTopic(session)
-  await post(ch, `🟢 *Session started*\n\`${session.cwd}\`\nBranch: \`${branch || '—'}\` · Session \`${session.id.slice(0, 8)}\``)
+  const provider = providerOf(session)
+  await post(ch, `🟢 *Session started*\n\`${session.cwd}\`\nBranch: \`${branch || '—'}\` · Session \`${session.id.slice(0, 8)}\`` +
+    (provider === 'codex' ? ` · Provider: *${providerLabel(provider)}*` : ''))
   return ch
 }
 
@@ -287,7 +326,7 @@ async function answerQuestionForm(session, n, label) {
   log('qform answered', session.id.slice(0, 8), n, JSON.stringify(label.slice(0, 50)))
 }
 async function clearQuestionForm(session) {
-  const q = qforms.get(session.id)
+  const q = providerOf(session) === 'claude' ? qforms.get(session.id) : null
   if (!q) return
   qforms.delete(session.id)
   try { await web.chat.update({ channel: session.channel, ts: q.ts, text: '✅ Question answered', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '❓ → ✅ _answered — the turn continues_' } }] }) } catch {}
@@ -348,6 +387,18 @@ async function finalizeTurn(session) {
   }, 5000)
 }
 
+// Codex exposes the stable final assistant text directly on Stop. Its JSONL
+// transcript is explicitly not a stable hook interface, so never parse it.
+async function finalizeCodexTurn(session, body) {
+  await clearStatus(session)
+  const turnId = body.turn_id || null
+  if (turnId && session.lastMirroredTurn === turnId) return
+  const text = String(body.last_assistant_message || '').trim()
+  if (text && session.channel) await postMd(session.channel, text)
+  if (turnId) session.lastMirroredTurn = turnId
+  saveState(state)
+}
+
 // Recover live status after a daemon restart. The poller and each status
 // message's ts live only in memory, so a restart mid-turn freezes the status —
 // the daemon can neither update it nor, on Stop, clear it. On boot we re-adopt:
@@ -363,6 +414,7 @@ async function findStatusMessage(channel) {
 }
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
+    if (providerOf(s) !== 'claude') continue // pane parsing below is Claude-TUI-specific
     if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
     const pane = await tmuxCapture(s.tmux)
     const spinning = !!extractSpinner(pane)
@@ -412,6 +464,7 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
 // only advances offset past COMPLETE lines, so a record being flushed is never
 // cut in half (which would orphan its bytes and lose the message).
 function readNewAssistantText(session) {
+  if (providerOf(session) !== 'claude') return ''
   const f = session.transcript
   if (!f || !fs.existsSync(f)) return ''
   const size = fs.statSync(f).size
@@ -464,25 +517,38 @@ async function validTmuxClaim(pid, tname) {
   return ok
 }
 
-async function onHook(body, ppid, tmux, flags, account) {
+async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'claude') {
+  const provider = normalizeProvider(requestedProvider)
+  if (!provider) return
   const ev = body.hook_event_name
-  const pid = await resolveClaudePid(ppid)
+  const pid = await resolveAgentPid(ppid, provider)
   if (!pid) return
   if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
   const sid = body.session_id
+  if (!sid) return
 
   let session = state.sessions[sid] || sessionByPid(pid)
+  if (session && isSupersededHook(ev, session.pid, pid)) {
+    log('ignored hook from superseded pid', ev, pid, 'current', session.pid, String(sid).slice(0, 8))
+    return
+  }
+  if (session && providerOf(session) !== provider) {
+    log('rejected cross-provider session collision', String(sid).slice(0, 8), provider)
+    return
+  }
   if (!session) {
     // Claude Code 2.1.220+ spawns internal background workers — a transient
     // per-user daemon, warm "spare" sessions, and background agents — which
     // inherit CCS_BRIDGE and the global hooks from their parent session. They
     // are not user terminals: registering them creates ghost channels. Gate NEW
     // registrations on the resolved process's command line.
-    let cmdline = ''
-    try { cmdline = (await execFile('ps', ['-o', 'command=', '-p', String(pid)])).stdout } catch {}
-    if (/--agent |bg-pty-host|bg-spare|daemon run|--session-id/.test(cmdline)) {
-      log('ignoring internal claude worker', sid.slice(0, 8), 'pid', pid)
-      return
+    if (provider === 'claude') {
+      let cmdline = ''
+      try { cmdline = (await execFile('ps', ['-o', 'command=', '-p', String(pid)])).stdout } catch {}
+      if (/--agent |bg-pty-host|bg-spare|daemon run|--session-id/.test(cmdline)) {
+        log('ignoring internal claude worker', sid.slice(0, 8), 'pid', pid)
+        return
+      }
     }
     // Adopt at the transcript's current end. A session the daemon has never seen
     // may carry a long pre-bridge history (e.g. resuming an old session into a
@@ -490,8 +556,9 @@ async function onHook(body, ppid, tmux, flags, account) {
     // first turn. Anchoring to EOF mirrors only from adoption onward. Brand-new
     // sessions have an empty/absent transcript, so this stays 0 for them.
     let tail = 0
-    try { tail = fs.statSync(body.transcript_path).size } catch {}
+    if (provider === 'claude') { try { tail = fs.statSync(body.transcript_path).size } catch {} }
     session = { id: sid, pid, cwd: body.cwd, tmux, transcript: body.transcript_path, offset: tail, channel: null, statusTs: null }
+    if (provider === 'codex') session.provider = 'codex'
     state.sessions[sid] = session
   }
   // Keep identity fresh (handles /clear: same pid, new sid). This path REBRANDS an
@@ -500,7 +567,7 @@ async function onHook(body, ppid, tmux, flags, account) {
   // session's channel and orphan it. Require the payload's own transcript to belong
   // to the new id, and require the same terminal.
   if (session.id !== sid) {
-    const transcriptMatches = !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
+    const transcriptMatches = provider === 'codex' || !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
     const sameTerminal = !tmux || !session.tmux || tmux === session.tmux
     if (!transcriptMatches || !sameTerminal) {
       log('rejected identity takeover of', session.id.slice(0, 8), 'by', String(sid).slice(0, 8),
@@ -520,9 +587,18 @@ async function onHook(body, ppid, tmux, flags, account) {
   if (session.tmux && !tmux && !(await validTmuxClaim(pid, session.tmux))) session.tmux = null
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
-  if (flags != null && flags !== '') session.launchFlags = flags
-  const acct = safeAccount(account)
-  if (acct && session.account !== acct) session.account = acct // which subscription pays for this session
+  if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) session.model = body.model
+  // During a bridge-initiated restart, the old process may emit trailing hooks
+  // after the desired settings were persisted. Never let one roll them back;
+  // the replacement SessionStart is allowed to confirm its actual launch values.
+  const acceptSettings = acceptHookSettings(ev, restarting.has(sid))
+  if (acceptSettings && flags != null && flags !== '') session.launchFlags = flags
+  if (provider === 'codex' && ev === 'SessionStart') {
+    const effort = resolveCodexEffort({ launchFlags: session.launchFlags, cwd: session.cwd })
+    if (effort) session.effort = effort
+  }
+  const acct = provider === 'claude' ? safeAccount(account) : null
+  if (acceptSettings && acct && session.account !== acct) session.account = acct // which subscription pays for this session
   saveState(state)
 
   if (ev === 'SessionStart') {
@@ -531,6 +607,7 @@ async function onHook(body, ppid, tmux, flags, account) {
     if (session.tmux) clearKillOnClose(session.tmux) // window close must NOT kill the session (Ghostty single-instance cascade)
     if (session.tmux) tmuxTitle(session.tmux, session.cwd || 'ccs') // initial title; updateTopic enriches it (folder · branch · model · effort)
     const ch = await ensureChannel(session)
+    await updateTopic(session) // existing channels also need fresh SessionStart metadata
     const src = body.source
     if (src === 'resume') await post(ch, '▶️ *Resumed*')
     else if (src === 'clear') await post(ch, '🧹 *Context cleared* — same channel, fresh session')
@@ -557,20 +634,23 @@ async function onHook(body, ppid, tmux, flags, account) {
     if (p && !consumeInjected(sid, p) && !p.includes('source="slack-bridge"') && !isSystemPrompt(p)) {
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
-    startPoller(session) // live spinner status while the turn runs
+    if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
+    else await setStatus(session, '⚙️ Codex is working…')
     return
   }
   if (ev === 'PreToolUse') {
     // Stream out any prose Claude wrote before this tool call, so the channel
     // shows the turn unfolding. Clearing the status lets the poller repost the
     // live spinner below the new prose on its next tick.
+    if (provider !== 'claude') return
     const text = readNewAssistantText(session)
     if (text) { await clearStatus(session); await postMd(session.channel, text) }
     return
   }
   if (ev === 'Stop') {
     log('stop hook', session.id.slice(0, 8))
-    await finalizeTurn(session)
+    if (provider === 'codex') await finalizeCodexTurn(session, body)
+    else await finalizeTurn(session)
     return
   }
   if (ev === 'SessionEnd') {
@@ -584,10 +664,20 @@ async function onHook(body, ppid, tmux, flags, account) {
 }
 
 // ---- permission relay -------------------------------------------------------
+const codexPermissionWaiters = new Map() // short request id → held hook response
+function permissionId() {
+  const alphabet = 'abcdefghijkmnopqrstuvwxyz'
+  let id = ''
+  do {
+    id = Array.from({ length: 5 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
+  } while (state.perms[id])
+  return id
+}
 async function postPermissionPrompt(channel, p) {
   const preview = String(p.input_preview || '').slice(0, 1200)
+  const agent = p.provider === 'codex' ? 'Codex' : 'Claude'
   const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `🔐 *Claude wants to use \`${escapeText(p.tool_name || 'a tool')}\`*\n${escapeText(String(p.description || '').slice(0, 600))}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `🔐 *${agent} wants to use \`${escapeText(p.tool_name || 'a tool')}\`*\n${escapeText(String(p.description || '').slice(0, 600))}` } },
   ]
   if (preview) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '```' + preview + '```' } })
   blocks.push(
@@ -609,8 +699,15 @@ async function applyVerdict(rid, behavior, channel, ts) {
   if (!req) return false
   delete state.perms[rid]
   saveState(state)
-  const s = streams.get(req.pid)
-  if (s) s.res.write(`data: ${JSON.stringify({ type: 'permission_verdict', request_id: rid, behavior })}\n\n`)
+  const waiter = codexPermissionWaiters.get(rid)
+  if (waiter) {
+    codexPermissionWaiters.delete(rid)
+    clearTimeout(waiter.timer)
+    if (!waiter.res.writableEnded) waiter.res.end(JSON.stringify(codexPermissionDecision(behavior)))
+  } else {
+    const s = streams.get(req.pid)
+    if (s) s.res.write(`data: ${JSON.stringify({ type: 'permission_verdict', request_id: rid, behavior })}\n\n`)
+  }
   log('verdict', behavior, rid, '→ session pid', req.pid)
   const decided = behavior === 'allow' ? '✅ *Approved*' : '⛔ *Denied*'
   try {
@@ -634,21 +731,11 @@ function injectToSession(pid, text) {
 // resume/continue flags, then add --resume <id>. Sessions launched before flag
 // capture fall back to the operator's usual flags (default: --dsp).
 function resumeArgs(session) {
-  const toks = (session.launchFlags || '').trim().split(/\s+/).filter(Boolean)
-  const keep = []
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i]
-    if (t === '--resume' || t === '-r') { i++; continue } // drop --resume <id>
-    if (t === '--continue' || t === '-c') continue
-    if (t === '--effort') { i++; continue } // drop; re-added below from the live value
-    keep.push(t)
-  }
-  if (!keep.length) keep.push(...(process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions').split(/\s+/).filter(Boolean))
-  // Claude Code resets runtime effort (set via /effort) on resume, so carry the
-  // last-known effort forward as a launch flag (--effort is a valid launch flag).
-  const effort = session.effort || sessionMeta.get(session.id)?.effort
-  if (effort) keep.push('--effort', effort)
-  return [...keep, '--resume', session.id]
+  const withMeta = session.effort ? session : { ...session, effort: sessionMeta.get(session.id)?.effort }
+  return resumeArgsFor(withMeta, {
+    defaultClaudeFlags: process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions',
+    defaultCodexFlags: process.env.CCS_CODEX_RESUME_FLAGS || '',
+  })
 }
 
 // /model and /effort now pop a "Change …? Yes / No" confirmation (changing either
@@ -671,6 +758,7 @@ async function sendMenuCommand(tmux, cmd) {
 // session.cwd there — which makes --resume look under the wrong slug and fail. Find
 // the dir that actually holds the transcript and re-anchor to it.
 function resumeCwd(session) {
+  if (providerOf(session) === 'codex') return session.cwd
   if (session.transcript && fs.existsSync(session.transcript)) return session.cwd
   const base = path.join(process.env.HOME, '.claude', 'projects')
   try {
@@ -695,6 +783,7 @@ async function resurrect(session, text) {
   try {
     const anchored = resumeCwd(session)
     if (anchored !== session.cwd) { log('resume cwd re-anchored', session.id.slice(0, 8), session.cwd, '→', anchored); session.cwd = anchored; saveState(state) }
+    const provider = providerOf(session)
     // Claude Code scopes --resume to the cwd's project, so the folder must exist at
     // its original path. If it's gone (e.g. a deleted worktree), recreate it empty —
     // the transcript in ~/.claude/projects survives, so the conversation resumes.
@@ -703,7 +792,8 @@ async function resurrect(session, text) {
         fs.mkdirSync(session.cwd, { recursive: true })
         await post(session.channel, `⚠️ Folder \`${session.cwd}\` was gone — recreated it empty and resuming there. The conversation is intact; files from the original folder are not.`)
       } catch (e) {
-        return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`claude --resume ${session.id}\` from a valid directory.`)
+        const manual = provider === 'codex' ? `codex resume ${session.id}` : `claude --resume ${session.id}`
+        return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`${manual}\` from a valid directory.`)
       }
     }
     await post(session.channel, '⏳ *Waking this session up on the Mac…*')
@@ -722,8 +812,9 @@ async function resurrect(session, text) {
         args,
         title: `ccs ${path.basename(session.cwd)} (resumed)`,
         tmuxName,
-        autoConsent: true,
-        account: session.account, // keep paying from the same subscription
+        autoConsent: provider === 'claude',
+        account: provider === 'claude' ? session.account : null, // Claude-only subscription binding
+        provider,
       })
       for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
       if (up) return // SessionStart clears the in-flight guard and flushes the queue
@@ -739,11 +830,13 @@ async function resurrect(session, text) {
 }
 const pendingBySid = new Map()
 
-// /cc-update: stop this session's Claude, update the CLI if a newer build exists,
+// /cc-update: stop this session's agent, update the CLI if a newer build exists,
 // then resume the same conversation with identical launch flags.
 async function updateAndRestart(session) {
-  const before = await claudeVersion()
-  await post(session.channel, `🔄 *Restarting ${path.basename(session.cwd)}* — stopping Claude, checking for updates, then resuming with the same flags.`)
+  const provider = providerOf(session)
+  const label = providerLabel(provider)
+  const before = await agentVersion(provider)
+  await post(session.channel, `🔄 *Restarting ${path.basename(session.cwd)}* — stopping ${label}, checking for updates, then resuming with the same flags.`)
   restarting.add(session.id)
   if (session.tmux) await tmuxKill(session.tmux)
   if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
@@ -752,14 +845,17 @@ async function updateAndRestart(session) {
   await sleep(1500) // let the old process fully exit before the binary is swapped
   let note = ''
   try {
-    const { stdout, stderr } = await execFile(claudeBin(), ['update'], { timeout: 180000 })
+    const bin = provider === 'codex' ? codexBin() : claudeBin()
+    const { stdout, stderr } = await execFile(bin, ['update'], { timeout: 180000 })
     note = (stdout + '\n' + stderr).split('\n').map(s => s.trim()).filter(Boolean).pop() || ''
   } catch (e) { note = `error: ${e?.stderr?.trim() || e?.message || e}` }
-  const after = await claudeVersion()
+  if (provider === 'codex') codexModelCache = null
+  else modelCache = { key: null, list: [] }
+  const after = await agentVersion(provider)
   const ver = before !== after ? `updated \`${before}\` → \`${after}\``
     : /error|fail/i.test(note) ? `⚠️ update check failed — staying on \`${after}\` (${note.slice(0, 120)})`
     : `already on the latest (\`${after}\`)`
-  await post(session.channel, `📦 Claude Code ${ver}. Resuming the conversation…`)
+  await post(session.channel, `📦 ${label} ${ver}. Resuming the conversation…`)
   await resurrect(session)
   setTimeout(() => restarting.delete(session.id), 60000) // safety net if the resume never starts
 }
@@ -787,15 +883,17 @@ async function handleSlackMessage(channel, text, sender) {
     return
   }
 
-  // The ./ commands were retired in favour of native /cc-* slash commands; nudge.
+  // The ./ commands were retired in favour of native namespaced slash commands; nudge.
   const dot = /^\.\/(\w+)/.exec(trimmed)
   if (dot && RETIRED_CMDS.has(dot[1])) {
-    return post(channel, `\`./\` commands are retired — use \`/cc-${dot[1]}\` instead (type \`/cc-\` for the list).`)
+    const provider = providerOf(sessionByChannel(channel))
+    const prefix = provider === 'codex' ? 'codex-' : 'cc-'
+    return post(channel, `\`./\` commands are retired — use \`${slackCommand(provider, dot[1])}\` instead (type \`/${prefix}\` for the list).`)
   }
 
   const session = sessionByChannel(channel)
   if (!session) {
-    if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new` to start a session, or `/cc-status` to list them.')
+    if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new` or `/codex-new` to start a session; `/cc-status` and `/codex-status` list each provider.')
     log('inbound (unmapped channel, ignored)', channel)
     return
   }
@@ -897,6 +995,7 @@ const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
 
 // Read the session's model from its transcript init record (first "model" field).
 function readModel(session) {
+  if (providerOf(session) === 'codex') return session.model || null
   try {
     const fd = fs.openSync(session.transcript, 'r')
     const buf = Buffer.alloc(65536)
@@ -908,9 +1007,11 @@ function readModel(session) {
   return null
 }
 
-async function spawnNew(channel, dir, extraFlags) {
+async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
   const cwd = path.resolve(dir.replace(/^~/, process.env.HOME))
-  if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
+  if (!isPathWithin(process.env.HOME, cwd) || !fs.existsSync(cwd)) return post(channel, `❌ Directory not allowed or missing: \`${cwd}\``)
+  provider = normalizeProvider(provider)
+  if (!provider) return post(channel, '❌ Unknown session provider.')
   // `--account <name>` picks the subscription; it is bridge config, not a claude flag.
   let account = null
   const ai = extraFlags.indexOf('--account')
@@ -920,34 +1021,35 @@ async function spawnNew(channel, dir, extraFlags) {
     if (!listAccounts().includes(account)) return post(channel, `❌ Unknown account \`${account}\`.`)
     extraFlags = extraFlags.filter((_, i) => i !== ai && i !== ai + 1)
   }
-  if (!extraFlags.length) extraFlags = defaultNewFlags() // a bare /cc-new must not yield a flagless session
+  if (provider === 'codex' && account) return post(channel, '❌ `--account` is only available for Claude Code sessions.')
+  if (!extraFlags.length) extraFlags = defaultNewFlags(provider) // provider-specific operator default
   const flags = []
   for (const f of extraFlags) {
-    const norm = FLAG_ALIAS[f] || f
-    if (ALLOWED_FLAGS.has(norm.split('=')[0])) flags.push(norm)
+    const norm = normalizeLaunchFlag(provider, f)
+    if (norm) flags.push(norm)
     else return post(channel, `❌ Flag not allowed: \`${f}\``)
   }
   const tmuxName = `ccs-new-${Date.now().toString(36)}`
-  await post(channel, `🚀 Spawning \`claude ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
+  await post(channel, `🚀 Spawning \`${providerCommand(provider)} ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
   await reapGhosttyZombies() // windowless-instance pileup breaks new windows
-  await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true, account })
+  await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: provider === 'claude', account, provider })
   let up = false
   for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
-  if (!up) await post(channel, '⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try `/cc-new` again.')
+  if (!up) await post(channel, `⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try \`${slackCommand(provider, 'new')}\` again.`)
 }
 
 const codeDir = () => process.env.CCS_CODE_DIR || path.join(process.env.HOME, 'Code')
-async function postFolderPicker(channel) {
+async function postFolderPicker(channel, provider = 'claude') {
   const base = codeDir()
   let dirs = []
   try { dirs = fs.readdirSync(base, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort() } catch {}
-  if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`/cc-new <folder>\`.`)
+  if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`${slackCommand(provider, 'new')} <folder>\`.`)
   const options = dirs.slice(0, 100).map(d => ({ text: { type: 'plain_text', text: d.slice(0, 75) }, value: d.slice(0, 75) }))
   await web.chat.postMessage({
     channel, text: 'Pick a project to start a session in',
     blocks: [{
-      type: 'section', text: { type: 'mrkdwn', text: `*Start a session* — pick a project in \`${base}\`:` },
-      accessory: { type: 'static_select', action_id: 'ccnew_folder', placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
+      type: 'section', text: { type: 'mrkdwn', text: `*Start a ${providerLabel(provider)} session* — pick a project in \`${base}\`:` },
+      accessory: { type: 'static_select', action_id: provider === 'codex' ? 'ccnew_folder_codex' : 'ccnew_folder', placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
     }],
   })
 }
@@ -1120,14 +1222,7 @@ async function switchAccount(session, name) {
 // Launch flags a session was started with, minus the resume plumbing (which the
 // daemon re-adds itself) — i.e. what the user actually chose.
 function displayFlags(session) {
-  const toks = (session.launchFlags || '').trim().split(/\s+/).filter(Boolean)
-  const out = []
-  for (let i = 0; i < toks.length; i++) {
-    if (toks[i] === '--resume' || toks[i] === '-r') { i++; continue }
-    if (toks[i] === '--continue' || toks[i] === '-c') continue
-    out.push(toks[i])
-  }
-  return out
+  return displayFlagsFor(session)
 }
 
 // Change a live session's launch flags. Claude Code reads them at startup, so
@@ -1147,30 +1242,81 @@ async function setFlags(session, flags) {
   setTimeout(() => restarting.delete(session.id), 60000)
 }
 
-// Flags a /cc-new session gets when none are given. Configurable because the
-// right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
-const defaultNewFlags = () =>
-  (process.env.CCS_NEW_FLAGS || '--dangerously-skip-permissions').split(/\s+/).filter(Boolean)
+async function setCodexSetting(session, name, value) {
+  session[name] = value
+  sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), [name]: value })
+  const alive = session.pid && pidAlive(session.pid)
+  if (!alive) {
+    saveState(state)
+    return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
+  }
+  await post(session.channel, `🔧 *Setting ${name}* → \`${value}\`. Restarting Codex and resuming this conversation…`)
+  restarting.add(session.id)
+  if (session.tmux) await tmuxKill(session.tmux)
+  if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+  await clearStatus(session)
+  session.pid = null
+  saveState(state)
+  await sleep(1500)
+  await resurrect(session)
+  setTimeout(() => restarting.delete(session.id), 60000)
+}
 
-// Command dispatch for the native /cc-* slash commands.
-async function dispatch(name, rest, channel) {
+// Flags a provider-specific new session gets when none are given. Configurable because the
+// right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
+const defaultNewFlags = (provider = 'claude') =>
+  (provider === 'codex'
+    ? process.env.CCS_CODEX_NEW_FLAGS || ''
+    : process.env.CCS_NEW_FLAGS || '--dangerously-skip-permissions')
+    .split(/\s+/).filter(Boolean)
+
+const SESSION_SCOPED_COMMANDS = new Set(['status', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags'])
+const CLAUDE_ONLY_COMMANDS = new Set(['account', 'usage'])
+const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
+
+function commandHelp(provider) {
+  if (provider === 'codex') {
+    return '*Codex commands* — type `/codex-` to autocomplete\n' +
+      '`/codex-new [folder] [flags]` — start a Codex session\n' +
+      '`/codex-model [m]` · `/codex-effort [e]` — show or set Codex model/reasoning effort\n' +
+      '`/codex-update` — update Codex CLI and restart/resume this session\n' +
+      '`/codex-flags [flags…]` — show or change Codex launch flags (restarts/resumes)\n' +
+      '`/codex-stop` — interrupt the running turn\n' +
+      '`/codex-status` — session info here, or list Codex sessions from control\n' +
+      '`/codex-kill [here|<id>]` — end a Codex session (channel stays, resumable)\n' +
+      '*Bridge-wide commands remain under `/cc-`:* `/cc-health` · `/cc-cleanup` · `/cc-claim`\n' +
+      '_Usage reporting and subscription switching are currently Claude-only._'
+  }
+  return '*Claude Code commands* — type `/cc-` to autocomplete\n' +
+    '`/cc-new [folder] [--dsp] [--chrome]` — start a Claude Code session\n' +
+    '`/cc-model [m]` · `/cc-effort [e]` — show or set Claude model/reasoning effort\n' +
+    '`/cc-update` — update Claude Code and restart/resume this session\n' +
+    '`/cc-account [name]` — choose the Claude subscription for this session\n' +
+    '`/cc-flags [--dsp --chrome …]` — show or change Claude launch flags (restarts/resumes)\n' +
+    '`/cc-stop` — interrupt the running turn\n' +
+    '`/cc-status` — session info here, or list Claude sessions from control\n' +
+    '`/cc-usage [days [n] | models | limits]` — Claude usage and plan limits\n' +
+    '`/cc-kill [here|<id>]` — end a Claude session (channel stays, resumable)\n' +
+    '`/cc-health` — bridge status · `/cc-cleanup` — archive dormant channels'
+}
+
+// Provider namespaces are explicit at ingress: /cc-* is Claude and
+// /codex-* is Codex. The implementation remains shared below.
+async function dispatch(name, rest, channel, commandProvider = 'claude') {
+  const cmd = commandName => slackCommand(commandProvider, commandName)
   if (name === 'help') {
-    return post(channel,
-      '*Commands* — use `/cc-<name>` (autocompletes as you type `/cc-`)\n' +
-      '`/cc-new [folder] [--dsp] [--chrome]` — start a session (no arg = pick a project)\n' +
-      '`/cc-model [m]` · `/cc-effort [e]` — show or set (no arg lists available models with versions)\n' +
-      '`/cc-update` — update Claude Code & restart this session with the same flags\n' +
-      '`/cc-account [name]` — which Claude subscription pays for this session (restarts & resumes)\n' +
-      '`/cc-flags [--dsp --chrome …]` — show or change this session\'s launch flags (restarts & resumes)\n' +
-      '`/cc-stop` — interrupt the running turn\n' +
-      '`/cc-status` — session info + manage collaborators here, or list all sessions from control\n' +
-      '`/cc-usage [days [n] | models | limits]` — usage: project here / aggregate in control; `days` = per-day sheet, `models` = per-model, `limits` = plan limits (5h/weekly %)\n' +
-      '`/cc-health` — bridge status\n' +
-      '`/cc-kill [here|<id>]` — end a session (channel stays, resumable)\n' +
-      '`/cc-cleanup` — archive dormant channels')
+    return post(channel, commandHelp(commandProvider))
+  }
+  if (commandProvider === 'codex' && (CLAUDE_ONLY_COMMANDS.has(name) || BRIDGE_COMMANDS.has(name))) {
+    return post(channel, `\`${cmd(name)}\` is not registered. ${BRIDGE_COMMANDS.has(name) ? `Use the bridge-wide \`/cc-${name}\`.` : 'This command is Claude-only.'}`)
+  }
+  const channelSession = channel !== state.control ? sessionByChannel(channel) : null
+  if (channelSession && SESSION_SCOPED_COMMANDS.has(name) && providerOf(channelSession) !== commandProvider) {
+    const actualProvider = providerOf(channelSession)
+    return post(channel, `This is a ${providerLabel(actualProvider)} session. Use \`${slackCommand(actualProvider, name === 'restart' ? 'update' : name)}\` here.`)
   }
   if (name === 'status') {
-    const session = channel !== state.control ? sessionByChannel(channel) : null
+    const session = channelSession
     if (session) {
       const { branch, worktree } = await gitInfo(session.cwd)
       const gs = await gitStatusText(session.cwd)
@@ -1181,38 +1327,42 @@ async function dispatch(name, rest, channel) {
       await postMd(channel,
         `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
         `| Field | Value |\n|---|---|\n` +
+        `| Provider | ${providerLabel(providerOf(session))} |\n` +
         `| Folder | ${session.cwd} |\n` +
         `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
         `| Model | ${meta.model || readModel(session) || '—'} |\n` +
-        `| Effort | ${meta.effort || '—'} |\n` +
+        `| Effort | ${meta.effort || session.effort || '—'} |\n` +
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
       await web.chat.postMessage({ channel, text: 'Collaborators', blocks: await collabBlocks(channel) })
       return
     }
-    const rows = Object.values(state.sessions).map(s => {
+    const rows = Object.values(state.sessions).filter(s => providerOf(s) === commandProvider).map(s => {
       const alive = s.pid && pidAlive(s.pid)
-      return `| ${path.basename(s.cwd)} | ${s.id.slice(0, 8)} | ${alive ? '🟢 active' : '💤 dormant'} |`
+      return `| ${path.basename(s.cwd)} | ${providerLabel(providerOf(s))} | ${s.id.slice(0, 8)} | ${alive ? '🟢 active' : '💤 dormant'} |`
     })
-    return postMd(channel, `| Session | ID | State |\n|---|---|---|\n${rows.join('\n') || '| _none_ | | |'}`)
+    return postMd(channel, `| Session | Provider | ID | State |\n|---|---|---|---|\n${rows.join('\n') || '| _none_ | | | |'}`)
   }
   if (name === 'health') {
     const sess = Object.values(state.sessions)
     const active = sess.filter(s => s.pid && pidAlive(s.pid)).length
+    const codex = sess.filter(s => providerOf(s) === 'codex').length
+    const claude = sess.length - codex
     const up = Math.round((Date.now() - BOOT_TS) / 1000)
     const hms = up < 3600 ? `${Math.round(up / 60)}m` : `${(up / 3600).toFixed(1)}h`
     return postMd(channel,
       `| Bridge health | |\n|---|---|\n` +
       `| Uptime | ${hms} |\n` +
       `| Sessions | ${active} active, ${sess.length - active} dormant |\n` +
+      `| Providers | ${claude} Claude, ${codex} Codex |\n` +
       `| Channel servers attached | ${streams.size} |\n` +
       `| Open permission prompts | ${Object.keys(state.perms).length} |`)
   }
   if (name === 'kill') {
     const target = rest[0] && rest[0] !== 'here'
-      ? Object.values(state.sessions).find(s => s.id.startsWith(rest[0]))
+      ? Object.values(state.sessions).find(s => providerOf(s) === commandProvider && s.id.startsWith(rest[0]))
       : sessionByChannel(channel)
-    if (!target) return post(channel, 'No matching session — use `/cc-kill` in a session channel, or `/cc-kill <id-prefix>`.')
+    if (!target) return post(channel, `No matching ${providerLabel(commandProvider)} session — use \`${cmd('kill')}\` in a session channel, or \`${cmd('kill')} <id-prefix>\`.`)
     if (target.tmux) await tmuxKill(target.tmux)
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
     await clearStatus(target)
@@ -1234,21 +1384,38 @@ async function dispatch(name, rest, channel) {
   }
   if (name === 'model' || name === 'effort') {
     const session = sessionByChannel(channel)
-    if (!session) return post(channel, `Use \`/cc-${name}\` in a session channel.`)
+    if (!session) return post(channel, `Use \`${cmd(name)}\` in a ${providerLabel(commandProvider)} session channel.`)
+    const provider = providerOf(session)
     const meta = sessionMeta.get(session.id) || {}
     if (!rest.length) {
       if (name === 'model') {
         const cur = meta.model || readModel(session) || 'unknown'
+        if (provider === 'codex') {
+          const models = await getCodexModels()
+          if (models.length) {
+            const rows = models.map(m => `| \`${m.id}\` | ${m.name} | ${m.efforts.join(' · ') || '—'} |`).join('\n')
+            return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <id>\`:\n| Model id | Name | Efforts |\n|---|---|---|\n${rows}`)
+          }
+          return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <id>\`.`)
+        }
         const models = await getModels()
         if (models.length) {
           const rows = models.map(m => `| \`${m.alias}\` | ${m.name} | \`${m.id}\` |`).join('\n')
           const hasLong = models.some(m => /-1m$/.test(m.alias))
-          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`/cc-model <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}` +
+          return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <alias>\` (or a full id):\n| Alias | Model | Full id |\n|---|---|---|\n${rows}` +
             (hasLong ? '\n_A family alias picks the *1M-context* variant when one exists — pass the full id for the standard window._' : ''))
         }
-        return post(channel, `*model*: \`${cur}\`\nSet with \`/cc-model <value>\`  (sonnet · opus · haiku · fable)`)
+        return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <value>\`  (sonnet · opus · haiku · fable)`)
       }
-      return post(channel, `*effort*: \`${meta.effort || 'unknown'}\`\nSet with \`/cc-effort <value>\`  (low · medium · high · max)`)
+      const efforts = provider === 'codex' ? CODEX_EFFORTS.join(' · ') : 'low · medium · high · max'
+      return post(channel, `*effort*: \`${meta.effort || session.effort || 'unknown'}\`\nSet with \`${cmd('effort')} <value>\`  (${efforts})`)
+    }
+    if (provider === 'codex') {
+      const val = rest.join(' ').toLowerCase()
+      if (name === 'effort' && !CODEX_EFFORTS.includes(val)) {
+        return post(channel, `❌ Unsupported Codex effort \`${val}\`. Use: ${CODEX_EFFORTS.join(' · ')}`)
+      }
+      return setCodexSetting(session, name, val)
     }
     if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
     let val = rest.join(' ')
@@ -1272,10 +1439,14 @@ async function dispatch(name, rest, channel) {
   if (name === 'stop') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
-    await tmuxInterrupt(session.tmux)
+    await tmuxInterrupt(session.tmux, providerOf(session))
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'usage') {
+    const session = channel !== state.control ? sessionByChannel(channel) : null
+    if (session && providerOf(session) === 'codex') {
+      return post(channel, 'Codex usage reporting is not exposed through the bridge yet — run `/usage` in the Codex terminal.')
+    }
     const sub = (rest[0] || '').toLowerCase()
     if (sub === 'limits') return usageLimits(channel) // instant — no transcript scan
     await post(channel, '⏳ Crunching transcripts…')
@@ -1290,6 +1461,7 @@ async function dispatch(name, rest, channel) {
     const available = listAccounts()
     const known = available.length ? available.map(a => `\`${a}\``).join(' · ') : '_none yet — add one on the Mac with_ `ccs-account add <name>`'
     if (!session) return post(channel, `*Subscriptions available:* ${known}\nRun \`/cc-account <name>\` in a session channel to bind that session to an account.`)
+    if (providerOf(session) === 'codex') return post(channel, '`/cc-account` is Claude-only; Codex uses the machine’s current Codex login.')
     const cur = session.account ? `\`${session.account}\`` : "this machine's own Claude login (default)"
     if (!rest.length) {
       return post(channel, `*Subscription for this session:* ${cur}\n*Available:* ${known}\nSwitch with \`/cc-account <name>\` (or \`/cc-account default\`). The session restarts and resumes — the conversation is kept.`)
@@ -1303,31 +1475,37 @@ async function dispatch(name, rest, channel) {
   }
   if (name === 'update' || name === 'restart') {
     const session = sessionByChannel(channel)
-    if (!session) return post(channel, 'Use `/cc-update` in a session channel — it updates Claude Code and restarts the session with the same flags.')
+    if (!session) return post(channel, `Use \`${cmd('update')}\` in a ${providerLabel(commandProvider)} session channel — it updates that CLI and restarts the session with the same flags.`)
     return updateAndRestart(session)
   }
   if (name === 'flags') {
     const session = sessionByChannel(channel)
-    if (!session) return post(channel, 'Use `/cc-flags` in a session channel.')
-    const allowed = [...ALLOWED_FLAGS].map(f => `\`${f}\``).join(' · ') + ' (`--dsp` works too)'
+    if (!session) return post(channel, `Use \`${cmd('flags')}\` in a ${providerLabel(commandProvider)} session channel.`)
+    const provider = providerOf(session)
+    const allowed = allowedFlags(provider).map(f => `\`${f}\``).join(' · ') + (provider === 'claude' ? ' (`--dsp` works too)' : '')
     if (!rest.length) {
       const cur = displayFlags(session)
       return post(channel, `*Launch flags:* ${cur.length ? '\`' + cur.join(' ') + '\`' : '_none_'}\n` +
-        `Set with \`/cc-flags --dsp --chrome\` — the session restarts and resumes this conversation.\n*Allowed:* ${allowed}`)
+        `Set with \`${cmd('flags')} <flags…>\` — the session restarts and resumes this conversation.\n*Allowed:* ${allowed}`)
     }
     const flags = []
     for (const f of rest) {
-      const norm = FLAG_ALIAS[f] || f
-      if (!ALLOWED_FLAGS.has(norm.split('=')[0])) return post(channel, `❌ Flag not allowed: \`${f}\`\n*Allowed:* ${allowed}`)
+      const norm = normalizeLaunchFlag(provider, f)
+      if (!norm) return post(channel, `❌ Flag not allowed: \`${f}\`\n*Allowed:* ${allowed}`)
       if (!flags.includes(norm)) flags.push(norm)
     }
     return setFlags(session, flags)
   }
   if (name === 'new') {
-    if (!rest.length) return postFolderPicker(channel)
-    return spawnNew(channel, rest[0], rest.slice(1))
+    const providerFlag = rest.find(arg => arg === '--codex' || arg === '--claude')
+    if (providerFlag) {
+      const requested = providerFlag === '--codex' ? 'codex' : 'claude'
+      return post(channel, `❌ Provider flags are retired. Use \`${slackCommand(requested, 'new')}\`; the command namespace now selects the provider.`)
+    }
+    if (!rest.length) return postFolderPicker(channel, commandProvider)
+    return spawnNew(channel, rest[0], rest.slice(1), commandProvider)
   }
-  return post(channel, `Unknown command: \`${name}\`. Try \`/cc-help\`.`)
+  return post(channel, `Unknown command: \`${name}\`. Try \`${cmd('help')}\`.`)
 }
 
 // ---- HTTP (hooks in, SSE out) ----------------------------------------------
@@ -1337,7 +1515,10 @@ http.createServer(async (req, res) => {
     let body = ''
     for await (const c of req) body += c
     res.end('ok')
-    try { await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'), req.headers['x-ccs-flags'], req.headers['x-ccs-account']) }
+    try {
+      await onHook(JSON.parse(body), url.searchParams.get('ppid'), url.searchParams.get('tmux'),
+        req.headers['x-ccs-flags'], req.headers['x-ccs-account'], req.headers['x-ccs-provider'] || 'claude')
+    }
     catch (e) { log('hook error', String(e)) }
     return
   }
@@ -1391,6 +1572,63 @@ http.createServer(async (req, res) => {
     } catch (e) { log('perm-request error', String(e)) }
     return
   }
+  if (url.pathname === '/codex/permission' && req.method === 'POST') {
+    let raw = ''
+    for await (const c of req) raw += c
+    res.setHeader('content-type', 'application/json')
+    try {
+      const p = JSON.parse(raw)
+      const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'codex')
+      const session = state.sessions[p.session_id] || sessionByPid(pid)
+      const tmux = url.searchParams.get('tmux')
+      const validClaim = !tmux || await validTmuxClaim(pid, tmux)
+      if (!session?.channel || providerOf(session) !== 'codex' ||
+          (session.pid && session.pid !== pid) || (session.tmux && tmux && session.tmux !== tmux) || !validClaim) {
+        log('codex perm-request: no Codex channel for pid', pid)
+        return res.end('{}') // no hook decision → ordinary local approval prompt
+      }
+      const rid = permissionId()
+      let preview = ''
+      try { preview = JSON.stringify(p.tool_input ?? {}, null, 2) } catch { preview = String(p.tool_input || '') }
+      const prompt = {
+        request_id: rid,
+        provider: 'codex',
+        tool_name: p.tool_name || 'tool',
+        description: p.tool_input?.description || 'Approval requested by Codex.',
+        input_preview: preview,
+      }
+      const ts = await postPermissionPrompt(session.channel, prompt)
+      state.perms[rid] = { pid, channel: session.channel, ts, tool: prompt.tool_name, provider: 'codex' }
+      saveState(state)
+      const timer = setTimeout(async () => {
+        const waiter = codexPermissionWaiters.get(rid)
+        if (!waiter) return
+        codexPermissionWaiters.delete(rid)
+        delete state.perms[rid]
+        saveState(state)
+        if (!res.writableEnded) res.end('{}')
+        try {
+          await web.chat.update({ channel: session.channel, ts, text: `⌛ Expired ${prompt.tool_name}`, blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: `⌛ *Permission request expired* \`${escapeText(prompt.tool_name)}\`` } },
+          ] })
+        } catch {}
+      }, 570000)
+      codexPermissionWaiters.set(rid, { res, timer })
+      res.on('close', () => {
+        const waiter = codexPermissionWaiters.get(rid)
+        if (!waiter || waiter.res !== res) return
+        clearTimeout(waiter.timer)
+        codexPermissionWaiters.delete(rid)
+        delete state.perms[rid]
+        saveState(state)
+      })
+      log('codex perm-request', rid, prompt.tool_name, '→', session.id.slice(0, 8))
+    } catch (e) {
+      log('codex perm-request error', String(e))
+      if (!res.writableEnded) res.end('{}')
+    }
+    return
+  }
   // Script-facing spawn API (localhost-only, same trust domain as /hook).
   // POST /spawn {cwd, flags[]} — launch a bridged session through the daemon so
   // external scripts (worktree tooling etc.) get the single-icon window path
@@ -1400,20 +1638,23 @@ http.createServer(async (req, res) => {
     for await (const c of req) body += c
     try {
       const j = JSON.parse(body || '{}')
+      const provider = normalizeProvider(j.provider || 'claude')
+      if (!provider) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'unknown provider' })) }
       const cwd = path.resolve(String(j.cwd || '').replace(/^~/, process.env.HOME))
-      if (!cwd.startsWith(process.env.HOME) || !fs.existsSync(cwd)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'cwd not allowed or missing' })) }
+      if (!isPathWithin(process.env.HOME, cwd) || !fs.existsSync(cwd)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'cwd not allowed or missing' })) }
       const flags = []
       for (const f of j.flags || []) {
-        const norm = FLAG_ALIAS[f] || f
-        if (!ALLOWED_FLAGS.has(norm.split('=')[0]) && !/^(fable|opus|sonnet|haiku|low|medium|high|max)$/.test(norm)) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: `flag not allowed: ${f}` })) }
+        const norm = normalizeLaunchFlag(provider, f) ||
+          (provider === 'claude' && /^(fable|opus|sonnet|haiku|low|medium|high|max)$/.test(f) ? f : null)
+        if (!norm) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: `flag not allowed: ${f}` })) }
         flags.push(norm)
       }
-      const account = j.account ? safeAccount(j.account) : null
+      const account = provider === 'claude' && j.account ? safeAccount(j.account) : null
       if (j.account && !account) { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid account name' })) }
       const tmuxName = `ccs-new-${Date.now().toString(36)}`
-      await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: true, account })
-      log('spawned via /spawn', cwd, JSON.stringify(flags), account ? `account=${account}` : '')
-      res.end(JSON.stringify({ ok: true, tmux: tmuxName }))
+      await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: provider === 'claude', account, provider })
+      log('spawned via /spawn', provider, cwd, JSON.stringify(flags), account ? `account=${account}` : '')
+      res.end(JSON.stringify({ ok: true, tmux: tmuxName, provider }))
     } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e?.message || e) })) }
     return
   }
@@ -1470,7 +1711,8 @@ sm.on('message', async ({ event, ack }) => {
   } catch (e) { log('slack msg error', String(e)) }
 })
 
-// Native /cc-* slash commands (registered in the manifest, delivered over the socket).
+// Native /cc-* and /codex-* slash commands (registered in the manifest and
+// delivered over the socket). The namespace is the source of provider truth.
 // First-run ownership claim. Fresh installs start with no SLACK_USER_ID — the
 // installer no longer asks anyone to dig their member ID out of their profile.
 // The first person to run /cc-claim becomes the owner, persisted to the config
@@ -1498,37 +1740,43 @@ async function respondEphemeral(body, text) {
 sm.on('slash_commands', async ({ body, ack }) => {
   try { await ack() } catch {}
   try {
-    const name = String(body.command || '').replace(/^\/cc-/, '')
+    const parsed = parseSlackCommand(body.command)
+    if (!parsed) return respondEphemeral(body, 'Unknown bridge command.')
+    const { name, provider } = parsed
     if (!USER) {
-      if (name !== 'claim') return respondEphemeral(body, 'This bridge is unclaimed — run `/cc-claim` to become its owner.')
+      if (provider !== 'claude' || name !== 'claim') return respondEphemeral(body, 'This bridge is unclaimed — run `/cc-claim` to become its owner.')
       USER = body.user_id
       persistOwner(USER)
       log('owner claimed', USER)
       await respondEphemeral(body, '👑 You own this bridge now. Check your new private #claude-code-bridge channel.')
       if (state.control) {
         try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
-        await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for commands — \`/cc-new\` starts a session, \`/cc-help\` lists everything.`).catch(() => {})
+        await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for Claude Code or \`/codex-\` for Codex; the matching \`-new\` and \`-help\` commands get you started.`).catch(() => {})
       }
       return
     }
-    if (name === 'claim') return respondEphemeral(body, body.user_id === USER ? 'You already own this bridge.' : 'This bridge already has an owner.')
+    if (name === 'claim') {
+      if (provider !== 'claude') return respondEphemeral(body, 'Ownership is bridge-wide — use `/cc-claim`.')
+      return respondEphemeral(body, body.user_id === USER ? 'You already own this bridge.' : 'This bridge already has an owner.')
+    }
     if (body.user_id !== USER) return
     const rest = String(body.text || '').trim().split(/\s+/).filter(Boolean)
     log('slash', body.command, JSON.stringify(body.text || ''))
-    await dispatch(name, rest, body.channel_id)
+    await dispatch(name, rest, body.channel_id, provider)
   } catch (e) { log('slash error', String(e)) }
 })
 
-// Interactive components: Approve/Deny buttons and the /cc-new folder picker.
+// Interactive components: Approve/Deny buttons and provider folder pickers.
 sm.on('interactive', async ({ body, ack }) => {
   try { await ack() } catch {}
   try {
     if (body?.type !== 'block_actions' || body.user?.id !== USER) return
     const action = body.actions?.[0]
     if (!action) return
-    if (action.action_id === 'ccnew_folder') {
+    if (action.action_id === 'ccnew_folder' || action.action_id === 'ccnew_folder_codex') {
       const folder = action.selected_option?.value
-      if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), defaultNewFlags())
+      const provider = action.action_id === 'ccnew_folder_codex' ? 'codex' : 'claude'
+      if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), defaultNewFlags(provider), provider)
       return
     }
     if (action.action_id === 'collab_add') {
@@ -1662,16 +1910,22 @@ setInterval(async () => {
   log('slack auth ok:', r.team, 'bot', r.user)
   // Remove any old client-detached → kill-session hooks from existing live sessions,
   // so a Ghostty single-instance window teardown can no longer cascade-kill them.
+  let hydratedCodexEffort = false
   for (const s of Object.values(state.sessions)) {
+    if (providerOf(s) === 'codex' && !s.effort) {
+      const effort = resolveCodexEffort({ launchFlags: s.launchFlags, cwd: s.cwd })
+      if (effort) { s.effort = effort; hydratedCodexEffort = true }
+    }
     if (s.tmux && s.pid && pidAlive(s.pid)) { clearKillOnClose(s.tmux); updateTopic(s).catch(() => {}) }
   }
+  if (hydratedCodexEffort) saveState(state)
   if (!state.control) {
     try {
       const c = await web.conversations.create({ name: 'claude-code-bridge', is_private: true })
       state.control = c.channel.id
       if (USER) { // fresh installs are unclaimed; /cc-claim invites the owner later
         await web.conversations.invite({ channel: c.channel.id, users: USER })
-        await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for commands — `/cc-new` to start a session, `/cc-status`, `/cc-help`.')
+        await post(c.channel.id, '🤖 *Bridge online.* Type `/cc-` for Claude Code or `/codex-` for Codex. Start with `/cc-new` or `/codex-new`; use the matching `-help` command for the list.')
       }
     } catch (e) {
       if (e?.data?.error === 'name_taken') {

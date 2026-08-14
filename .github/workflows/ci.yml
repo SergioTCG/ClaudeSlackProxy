@@ -18,7 +18,11 @@ jobs:
       - name: Syntax-check JS
         run: |
           for f in daemon/*.mjs channel/*.mjs; do node --check "$f"; done
+      - name: Test
+        run: npm test
       - name: Shellcheck scripts
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck -S warning bin/ccs bin/ccs-consent hooks/hook.sh install.sh
+          shellcheck -S warning \
+            bin/ccs bin/ccs-consent bin/ccs-codex bin/ccs-spawn \
+            hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh

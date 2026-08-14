@@ -1,7 +1,7 @@
 {
   "display_information": {
     "name": "Clavdivs",
-    "description": "Bidirectional bridge between Slack and local Claude Code sessions",
+    "description": "Bidirectional bridge between Slack and local Claude Code or Codex terminal sessions",
     "background_color": "#1a1a2e"
   },
   "features": {
@@ -10,20 +10,30 @@
       "always_online": true
     },
     "slash_commands": [
-      { "command": "/cc-model", "description": "Show this session's model, or set it", "usage_hint": "[sonnet | opus | haiku | fable]", "should_escape": false },
-      { "command": "/cc-effort", "description": "Show this session's effort level, or set it", "usage_hint": "[low | medium | high | max]", "should_escape": false },
-      { "command": "/cc-new", "description": "Start a new Claude Code session (pick a project)", "usage_hint": "[folder] [--dsp] [--chrome]", "should_escape": false },
-      { "command": "/cc-status", "description": "Session info here, or all sessions from the control channel", "should_escape": false },
+      { "command": "/cc-model", "description": "Show or set this Claude Code session's model", "usage_hint": "[model id or alias]", "should_escape": false },
+      { "command": "/cc-effort", "description": "Show or set this Claude Code session's reasoning effort", "usage_hint": "[low | medium | high | max]", "should_escape": false },
+      { "command": "/cc-new", "description": "Start a Claude Code session", "usage_hint": "[folder] [Claude flags]", "should_escape": false },
+      { "command": "/cc-status", "description": "Claude session info here, or list Claude sessions", "should_escape": false },
       { "command": "/cc-usage", "description": "Token & cost usage — project here, aggregate in control channel", "usage_hint": "[days [n] | models | limits]", "should_escape": false },
       { "command": "/cc-health", "description": "Bridge daemon health", "should_escape": false },
       { "command": "/cc-cleanup", "description": "Archive dormant session channels", "should_escape": false },
       { "command": "/cc-claim", "description": "Claim this bridge as its owner (first-run setup)", "should_escape": false },
       { "command": "/cc-account", "description": "Which Claude subscription pays for this session", "usage_hint": "[name | default]", "should_escape": false },
-      { "command": "/cc-flags", "description": "Show or change this session's launch flags", "usage_hint": "[--dsp] [--chrome]", "should_escape": false },
-      { "command": "/cc-update", "description": "Update Claude Code & restart this session with the same flags", "should_escape": false },
-      { "command": "/cc-stop", "description": "Interrupt the running turn in this session", "should_escape": false },
-      { "command": "/cc-kill", "description": "End this session (channel stays, resumable)", "should_escape": false },
-      { "command": "/cc-help", "description": "List bridge commands", "should_escape": false }
+      { "command": "/cc-flags", "description": "Show or change Claude Code launch flags", "usage_hint": "[--dsp] [--chrome]", "should_escape": false },
+      { "command": "/cc-update", "description": "Update Claude Code and restart/resume this session", "should_escape": false },
+      { "command": "/cc-stop", "description": "Interrupt this Claude Code session's running turn", "should_escape": false },
+      { "command": "/cc-kill", "description": "End a Claude Code session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
+      { "command": "/cc-help", "description": "List Claude Code and bridge-wide commands", "should_escape": false },
+
+      { "command": "/codex-model", "description": "Show or set this Codex session's model", "usage_hint": "[model id]", "should_escape": false },
+      { "command": "/codex-effort", "description": "Show or set this Codex session's reasoning effort", "usage_hint": "[low | medium | high | xhigh | max | ultra]", "should_escape": false },
+      { "command": "/codex-new", "description": "Start a Codex session", "usage_hint": "[folder] [Codex flags]", "should_escape": false },
+      { "command": "/codex-status", "description": "Codex session info here, or list Codex sessions", "should_escape": false },
+      { "command": "/codex-flags", "description": "Show or change Codex launch flags", "usage_hint": "[--search] [--model=value]", "should_escape": false },
+      { "command": "/codex-update", "description": "Update Codex and restart/resume this session", "should_escape": false },
+      { "command": "/codex-stop", "description": "Interrupt this Codex session's running turn", "should_escape": false },
+      { "command": "/codex-kill", "description": "End a Codex session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
+      { "command": "/codex-help", "description": "List Codex commands", "should_escape": false }
     ]
   },
   "oauth_config": {

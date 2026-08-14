@@ -1,7 +1,7 @@
 {
   "name": "claude-slack-proxy",
-  "version": "0.2.25",
-  "description": "Drive local Claude Code sessions from Slack — a private channel per session, bidirectional.",
+  "version": "0.2.26",
+  "description": "Drive local Claude Code and Codex CLI sessions from Slack — a private channel per session, bidirectional.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -18,7 +18,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "daemon": "node daemon/daemon.mjs"
+    "daemon": "node daemon/daemon.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { providerCommand } from './providers.mjs'
 
 export const execFile = promisify(_execFile)
 export const BRIDGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -64,18 +65,21 @@ async function psField(field, pid) {
   }
 }
 
-// Walk up from `start` until we find the owning `claude` process.
-export async function resolveClaudePid(start) {
+// Walk up from a hook process until we find the owning agent. The Claude export
+// remains as a compatibility wrapper for the existing channel server paths.
+export async function resolveAgentPid(start, provider = 'claude') {
   let pid = Number(start)
+  const match = provider === 'codex' ? /codex/i : /claude/i
   for (let hop = 0; hop < 6 && pid > 1; hop++) {
     const comm = await psField('comm', pid)
-    if (/claude/i.test(comm)) return pid
+    if (match.test(comm)) return pid
     const pp = Number(await psField('ppid', pid))
     if (!pp || pp === pid) break
     pid = pp
   }
   return Number(start) || null
 }
+export const resolveClaudePid = start => resolveAgentPid(start, 'claude')
 
 export function pidAlive(pid) {
   try {
@@ -173,9 +177,10 @@ export async function tmuxTitle(tname, text) {
   } catch {}
 }
 
-// Send Escape — Claude Code's interrupt key — to abort the running turn.
-export async function tmuxInterrupt(tname) {
-  await execFile('tmux', ['send-keys', '-t', tname, 'Escape'])
+// Codex's launcher binds F12 to interrupt_turn, avoiding Ctrl-C's idle/exit
+// ambiguity. Claude retains its established Escape behavior.
+export async function tmuxInterrupt(tname, provider = 'claude') {
+  await execFile('tmux', ['send-keys', '-t', tname, provider === 'codex' ? 'F12' : 'Escape'])
 }
 
 // Inject a full message into the session's input box as a bracketed paste,
@@ -228,6 +233,7 @@ export async function reapGhosttyZombies(minAgeSec = 60) {
 function sanitizedEnv() {
   const env = { ...process.env }
   for (const k of Object.keys(env)) if (/^(CCS_|CLAUDE|ANTHROPIC_)/.test(k)) delete env[k]
+  for (const k of ['CODEX_THREAD_ID', 'CODEX_TURN_ID', 'CODEX_SESSION_ID']) delete env[k]
   return env
 }
 
@@ -319,11 +325,12 @@ end tell`
 // validated here as well as at the CLI — never trust a stored value blindly.
 export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(a) ? a : null)
 
-export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, account }) {
-  const acct = safeAccount(account)
+export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, account, provider = 'claude' }) {
+  const acct = provider === 'claude' ? safeAccount(account) : null
+  const launcher = provider === 'codex' ? 'ccs-codex' : 'ccs'
   // Only the NAME travels in the command line (ps is world-readable); `ccs`
   // resolves it to the token from the 0600 accounts file.
-  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', 'ccs'))} ${args.map(shq).join(' ')}`
+  const ccsCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${provider === 'codex' ? ' CCS_PROVIDER=codex' : ''}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', launcher))} ${args.map(shq).join(' ')}`
   if (process.env.CCS_GHOSTTY_SINGLE === '1') {
     // Single-icon mode: the daemon owns the tmux session (created detached);
     // windows are just viewports requested from the one bridge instance.
@@ -350,7 +357,10 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
         }
         const pane = await tmuxCapture(tmuxName)
         if (pane.trim()) lastPane = pane
-        if (/bypass permissions|shift\+tab to cycle/.test(pane)) ready = true
+        const readyPattern = provider === 'codex'
+          ? /codex|openai|review hooks|what would you like/i
+          : /bypass permissions|shift\+tab to cycle/
+        if (readyPattern.test(pane)) ready = true
       }
       if (!ready && (await tmuxAlive(tmuxName))) { ready = true; log('boot verification timed out but tmux alive — proceeding', tmuxName) }
     }
@@ -374,7 +384,7 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
     // mirrors the Slack channel topic (see tmuxTitle/updateTopic).
     await execFile('open', ['-na', 'Ghostty.app', '--args', ...hidden,
       '--quit-after-last-window-closed=true', '-e', 'zsh', '-lc', inner], { env: sanitizedEnv() })
-    log('spawned ghostty', { cwd, args, tmuxName })
+    log('spawned ghostty', { provider: providerCommand(provider), cwd, args, tmuxName })
   }
   if (autoConsent) {
     // Nobody is at the Mac: smart-dismiss the trust / dev-channels dialogs when

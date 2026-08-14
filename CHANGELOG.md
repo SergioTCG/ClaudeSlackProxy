@@ -4,6 +4,43 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.26] — 2026-08-14
+
+### Added
+- **Opt-in Codex CLI terminal sessions.** `ccs-codex` and
+  `/codex-new <folder>` reuse the existing private-channel, tmux,
+  Ghostty, attachment, resurrection, and Slack command infrastructure. Codex
+  lifecycle hooks mirror terminal prompts and stable final assistant text;
+  synchronous permission hooks relay approve/deny decisions through Slack.
+- **Provider-aware commands and state.** Missing provider fields continue to
+  mean Claude, so existing state needs no migration. Status/health, model,
+  reasoning effort, flags, update, interrupt, spawn API, and project picker now
+  dispatch to the active provider.
+- **Explicit Slack command namespaces.** `/cc-*` is Claude-only and the parallel
+  `/codex-*` commands are Codex-only. Bridge-wide ownership, health, and cleanup
+  remain singular under `/cc-*`; Claude usage and account switching remain
+  Claude-only. Existing Slack apps must apply the updated manifest once to
+  register the new command names; scopes and tokens are unchanged.
+- **Separate Codex activation.** `install-codex.sh` idempotently merges user
+  hooks and links the launcher without changing Claude settings or restarting
+  the daemon. Codex `/hooks` trust remains explicit.
+
+### Fixed
+- **Codex channel topics now include reasoning effort.** Codex lifecycle hooks
+  expose the model but not effort, so the bridge resolves effort from the
+  session's launch override and layered Codex configuration. Existing live
+  channels are hydrated safely on daemon restart; Codex transcript JSONL
+  remains outside the runtime integration.
+
+### Security
+- Codex remote-spawn flags use a narrow provider-specific allowlist; arbitrary
+  config overrides, feature toggles, profiles, extra writable directories, and
+  hook-trust bypass are rejected.
+- Stale hooks from a process being replaced can no longer roll back persisted
+  flags/account/model settings or mark the new process dormant.
+
+[0.2.26]: https://github.com/SergioTCG/ClaudeSlackProxy/releases/tag/v0.2.26
+
 ## [0.2.25] — 2026-08-13
 
 ### Fixed
