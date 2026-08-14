@@ -4,6 +4,20 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-08-14
+
+### Released
+- Promoted RC.2 after production canaries confirmed live Codex token progress,
+  `/codex-usage` reporting, and quiet topic synchronization against the existing
+  Slack app and session.
+- Audited all 22 managed channels after an unchanged daemon restart and found
+  zero topic-change events. A live Codex turn displayed elapsed time plus total,
+  output, and reasoning-token deltas.
+- Confirmed the installer recovered from the observed transient launchd error 5
+  on its bounded retry while keeping exactly one Socket Mode daemon connected.
+
+[1.2.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.2.0
+
 ## [1.2.0-rc.2] — 2026-08-14
 
 ### Fixed
