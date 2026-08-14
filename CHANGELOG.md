@@ -4,6 +4,17 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-08-14
+
+### Released
+- Promoted the RC.1 runtime after the production canary preserved the existing
+  Codex session and Slack channel across the daemon roll. Post-roll Slack input
+  reached the live session with exactly one Socket Mode daemon connected.
+- Verified `sab-cc`, `sab-codex`, `ccs`, and `ccs-codex` against the installed
+  Claude Code and Codex CLIs before promotion.
+
+[1.1.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.1.0
+
 ## [1.1.0-rc.1] — 2026-08-14
 
 ### Added
