@@ -4,6 +4,18 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-08-15
+
+### Released
+- Promoted the exact RC.1 runtime after a production Slack request generated and
+  returned `ana-dashboard-2026-08-15.pdf` (`application/pdf`, 355,972 bytes) in
+  the existing `cc-project99-ana` channel through the grant-bound upload path.
+- Confirmed the live rollout preserved existing sessions and tmux processes with
+  exactly one Socket Mode daemon, while the installed bot reused its existing
+  `files:write` grant without a manifest or OAuth change.
+
+[1.3.0]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.3.0
+
 ## [1.3.0-rc.1] — 2026-08-15
 
 ### Added
