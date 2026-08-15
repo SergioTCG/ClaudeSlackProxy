@@ -112,6 +112,7 @@ else
 fi
 mkdir -p "$BIN_DIR"
 ln -sf "$BRIDGE/bin/ccs-spawn" "$BIN_DIR/ccs-spawn"
+ln -sf "$BRIDGE/bin/sab-upload" "$BIN_DIR/sab-upload"
 if wants_claude; then
   ln -sf "$BRIDGE/bin/sab-cc" "$BIN_DIR/sab-cc"
   ln -sf "$BRIDGE/bin/ccs" "$BIN_DIR/ccs"
@@ -123,7 +124,7 @@ if wants_codex; then
   ln -sf "$BRIDGE/bin/ccs-codex" "$BIN_DIR/ccs-codex"
   say "  linked $BIN_DIR/sab-codex (with ccs-codex compatibility alias)"
 fi
-chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex \
+chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex "$BRIDGE"/bin/sab-upload \
   "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
   "$BRIDGE"/bin/ccs-window "$BRIDGE"/bin/ccs-spawn "$BRIDGE"/bin/ccs-account \
   "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \

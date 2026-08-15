@@ -8,7 +8,7 @@
       guide describe the same provider and safety contracts.
 - [ ] `slack/app-manifest.json` is the sole Slack manifest.
 - [ ] `/cc-*` and `/codex-*` command namespaces match the documented release contract.
-- [ ] `sab-cc` and `sab-codex` work, and `ccs` / `ccs-codex` forward all args.
+- [ ] `sab-cc`, `sab-codex`, and `sab-upload` work, and `ccs` / `ccs-codex` forward all args.
 - [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
       are covered by tests.
 - [ ] No secrets, local state, logs, or generated files are tracked.
@@ -48,6 +48,8 @@
 - [ ] Restarting with unchanged metadata does not write channel topics again.
 - [ ] Claude and Codex usage reports, plus live Codex time/token status, work.
 - [ ] File transfer, interrupt, model, effort, flags, and update commands work.
+- [ ] Owner and collaborator artifact returns work; expired/replayed grants and
+      workspace/symlink escapes are rejected.
 - [ ] Permission relay is exercised once in a non-dangerous test session.
 - [ ] No duplicate Slack channels appear.
 

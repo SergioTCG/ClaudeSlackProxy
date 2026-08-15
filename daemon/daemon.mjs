@@ -22,6 +22,10 @@ import {
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createTopicSync } from './topic.mjs'
 import {
+  ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
+  slackArtifactUploadOptions,
+} from './artifacts.mjs'
+import {
   codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus, formatTokens,
   usageCost, usageDate, usageRows,
 } from './usage.mjs'
@@ -31,6 +35,7 @@ let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
 const TEAM = process.env.SLACK_TEAM_ID
 const web = new WebClient(process.env.SLACK_BOT_TOKEN)
 const syncTopic = createTopicSync(web)
+const artifactGrants = createArtifactGrantStore()
 const state = loadState()
 if (!state.perms) state.perms = {} // open permission prompts, survive daemon restarts
 if (!state.whitelist) state.whitelist = {} // channel → { userId: name }: collaborators allowed to post
@@ -152,6 +157,31 @@ async function postMd(channel, md) {
     })
   }
   for (const m of mdToMessages(md)) await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
+}
+
+// Every accepted Slack prompt receives a short-lived, one-use upload capability.
+// The agent sees how to invoke it, but never gets to choose the destination:
+// the daemon binds the opaque grant to this session, channel, provider, sender,
+// and workspace. Unused grants expire in memory and are pruned on later use.
+function withArtifactDelivery(session, text, request) {
+  if (!request?.userId || !session?.channel || !session?.cwd) return text
+  try {
+    const { token } = artifactGrants.issue({
+      sessionId: session.id,
+      channelId: session.channel,
+      provider: providerOf(session),
+      userId: request.userId,
+      messageTs: request.messageTs,
+      // Stay in an existing Slack thread, but do not force ordinary channel
+      // messages into newly-created threads.
+      threadTs: request.threadTs,
+      workspaceRoot: session.cwd,
+    })
+    return text + artifactDeliveryInstruction(token)
+  } catch (error) {
+    log('artifact grant unavailable', session.id.slice(0, 8), error?.code || String(error))
+    return text
+  }
 }
 
 async function ensureChannel(session) {
@@ -1000,7 +1030,7 @@ async function updateAndRestart(session) {
   setTimeout(() => restarting.delete(session.id), 60000) // safety net if the resume never starts
 }
 
-async function handleSlackMessage(channel, text, sender) {
+async function handleSlackMessage(channel, text, sender, request) {
   const trimmed = text.trim()
 
   // Collaborators may only send prompts into a LIVE session: no permission
@@ -1012,7 +1042,7 @@ async function handleSlackMessage(channel, text, sender) {
     if (!(session.pid && pidAlive(session.pid))) {
       return post(channel, `💤 Session is dormant — <@${sender.id}>’s message wasn’t delivered. Only the owner can resume it.`)
     }
-    return injectText(session, `[Slack collaborator ${sender.name}]\n${trimmed}`)
+    return injectText(session, withArtifactDelivery(session, `[Slack collaborator ${sender.name}]\n${trimmed}`, request))
   }
 
   // permission verdict by text ("yes abcde" / "no abcde")
@@ -1054,7 +1084,7 @@ async function handleSlackMessage(channel, text, sender) {
     }
     return post(channel, '❓ A question form is open — tap a button above or reply with just its number.')
   }
-  await injectText(session, trimmed)
+  await injectText(session, withArtifactDelivery(session, trimmed, request))
 }
 const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kill', 'cleanup', 'stop', 'help'])
 
@@ -1099,7 +1129,7 @@ async function downloadSlackFile(url) {
 }
 
 // Download files shared in a channel and inject them as local paths Claude can read.
-async function handleAttachments(channel, caption, files, sender) {
+async function handleAttachments(channel, caption, files, sender, request) {
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
   if (sender && !(session.pid && pidAlive(session.pid))) {
@@ -1128,7 +1158,8 @@ async function handleAttachments(channel, caption, files, sender) {
   const body = caption?.trim()
     ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
     : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
-  await injectText(session, sender ? `[Slack collaborator ${sender.name}]\n${body}` : body)
+  const attributed = sender ? `[Slack collaborator ${sender.name}]\n${body}` : body
+  await injectText(session, withArtifactDelivery(session, attributed, request))
 }
 
 const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
@@ -1811,6 +1842,57 @@ http.createServer(async (req, res) => {
     }
     return
   }
+  // Agent-facing artifact delivery. An opaque grant is minted only for an
+  // owner/whitelisted Slack message; process ancestry + tmux bind the caller to
+  // that same live provider session. The caller supplies paths, never a Slack
+  // destination. Realpath containment prevents workspace and symlink escapes.
+  if (url.pathname === '/artifact/upload' && req.method === 'POST') {
+    res.setHeader('content-type', 'application/json')
+    try {
+      let raw = ''
+      for await (const chunk of req) {
+        raw += chunk
+        if (Buffer.byteLength(raw) > 65536) {
+          throw new ArtifactUploadError('request_too_large', 'The upload request is too large.', 413)
+        }
+      }
+      let request
+      try { request = JSON.parse(raw || '{}') }
+      catch { throw new ArtifactUploadError('invalid_json', 'The upload request is not valid JSON.') }
+
+      const provider = normalizeProvider(req.headers['x-ccs-provider'] || 'claude')
+      const tmux = String(url.searchParams.get('tmux') || '')
+      if (!provider || !tmux) {
+        throw new ArtifactUploadError('unauthorized_session', 'The upload must come from a live bridged session.', 403)
+      }
+      const pid = await resolveAgentPid(url.searchParams.get('ppid'), provider)
+      const session = sessionByPid(pid)
+      const validClaim = session?.tmux === tmux && await validTmuxClaim(pid, tmux)
+      if (!session?.channel || providerOf(session) !== provider || !validClaim || !pidAlive(pid)) {
+        throw new ArtifactUploadError('unauthorized_session', 'The upload must come from its authorized live session.', 403)
+      }
+
+      const result = await fulfillArtifactUpload(artifactGrants, {
+        token: request.grant,
+        binding: { sessionId: session.id, channelId: session.channel, provider },
+        paths: request.paths,
+      }, async ({ grant, files }) => {
+        await enqueue(grant.channelId, () => web.filesUploadV2(slackArtifactUploadOptions(grant, files)))
+      })
+      log('artifact uploaded', provider, session.id.slice(0, 8), result.filenames.join(','), result.totalBytes + 'b')
+      res.end(JSON.stringify({ ok: true, ...result }))
+    } catch (error) {
+      if (error instanceof ArtifactUploadError) {
+        res.writeHead(error.status)
+        res.end(JSON.stringify({ ok: false, error: error.message, code: error.code }))
+      } else {
+        log('artifact upload failed', error?.data?.error || String(error))
+        res.writeHead(502)
+        res.end(JSON.stringify({ ok: false, error: 'Slack did not accept the upload; the grant remains retryable.' }))
+      }
+    }
+    return
+  }
   // Script-facing spawn API (localhost-only, same trust domain as /hook).
   // POST /spawn {cwd, flags[]} — launch a bridged session through the daemon so
   // external scripts (worktree tooling etc.) get the single-icon window path
@@ -1886,10 +1968,15 @@ sm.on('message', async ({ event, ack }) => {
   const name = isOwner ? null : whitelistedName(event.channel, event.user)
   if (!isOwner && !name) return
   const sender = isOwner ? null : { id: event.user, name }
+  const request = {
+    userId: event.user,
+    messageTs: event.ts || null,
+    threadTs: event.thread_ts || null,
+  }
   try {
     const text = unescapeSlack(event.text || '')
-    if (event.files?.length) await handleAttachments(event.channel, text, event.files, sender)
-    else await handleSlackMessage(event.channel, text, sender)
+    if (event.files?.length) await handleAttachments(event.channel, text, event.files, sender, request)
+    else await handleSlackMessage(event.channel, text, sender, request)
   } catch (e) { log('slack msg error', String(e)) }
 })
 

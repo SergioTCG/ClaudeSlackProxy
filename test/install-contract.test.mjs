@@ -23,6 +23,7 @@ test('installer preserves installed runtime identities', () => {
   assert.match(installer, /Node >= 20 required/)
   assert.match(installer, /bin\/sab-cc/)
   assert.match(installer, /bin\/sab-codex/)
+  assert.match(installer, /bin\/sab-upload/)
 })
 
 test('legacy Codex activation remains a no-restart operation', () => {
@@ -84,8 +85,10 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs-codex')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-cc')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-codex')).isSymbolicLink())
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-upload')).isSymbolicLink())
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), path.resolve('bin/sab-cc'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-codex')), path.resolve('bin/sab-codex'))
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-upload')), path.resolve('bin/sab-upload'))
     assert.equal(fs.existsSync(path.join(temp, 'Library/LaunchAgents')), false)
   } finally {
     fs.rmSync(temp, { recursive: true, force: true })

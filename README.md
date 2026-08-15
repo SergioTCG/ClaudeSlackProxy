@@ -30,6 +30,7 @@ capabilities are identical.
 |---|---:|---:|
 | Private channel per terminal session | ✓ | ✓ |
 | Slack prompts and file attachments | ✓ | ✓ |
+| Return generated files to Slack | ✓ | ✓ |
 | Mirrored prompts and final responses | ✓ | ✓ |
 | Terminal-close detection and Slack resume | ✓ | ✓ |
 | Model and reasoning-effort controls | ✓ | ✓ |
@@ -126,6 +127,7 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 |---|---|
 | Any message in a session channel | Inject into that session; resume it first if dormant |
 | File or image attachment | Download locally and provide the path to the agent |
+| “Create/export … and send it here” | Generate files and attach them back to this channel or thread |
 | `/cc-new [folder] [flags]` / `/codex-new [folder] [flags]` | Start the selected provider |
 | `/cc-model [model]` / `/codex-model [model]` | Show or change the provider model |
 | `/cc-effort [level]` / `/codex-effort [level]` | Show or change reasoning effort |
@@ -158,6 +160,20 @@ a live session, but cannot run slash commands, answer permission prompts, or
 resurrect it. All other actions remain owner-only. The per-channel allowlist is
 persisted across daemon restarts.
 
+### Return generated files to Slack
+
+Ask naturally in a session channel, for example: “Export `report.html` as a PDF
+and send it here.” The accepted prompt gives that agent turn a short-lived,
+one-use capability to invoke `sab-upload`; the bot then attaches the generated
+file to the same Slack channel or existing thread.
+
+The destination is daemon-controlled. Files must resolve inside the session's
+workspace, be regular files, and total no more than 100 MiB across at most ten
+files. Path traversal and symlink escapes are rejected. The owner and explicitly
+allowed channel collaborators may request artifacts; messages from everyone
+else are ignored before an upload grant exists. If the daemon restarts before
+delivery, resend the Slack request to obtain a fresh grant.
+
 ### Per-session Claude subscriptions
 
 ```bash
@@ -177,7 +193,8 @@ protocol:
 
 - `/cc-*` remains Claude and `/codex-*` remains Codex; 1.2 adds
   `/codex-usage` without changing either namespace.
-- `sab-cc` and `sab-codex` are canonical; `ccs` and `ccs-codex` remain aliases.
+- `sab-cc` and `sab-codex` are canonical; `sab-upload` is their shared,
+  grant-bound artifact helper; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
 - Existing `~/.claudeslackproxy` installations remain in place.
 - `si.sergej.claudeslackproxy` remains the sole LaunchAgent label.
@@ -191,6 +208,8 @@ installation forward or back. Existing 1.0 installations can follow the
 [1.1 launcher migration](docs/migrating-to-1.1.md) to put `sab-*` on `PATH`.
 For the new Codex usage command and its one-time manifest refresh, see the
 [1.2 migration guide](docs/migrating-to-1.2.md).
+Generated-file delivery requires no Slack app change; see the
+[1.3 migration guide](docs/migrating-to-1.3.md).
 
 ## Operations
 

@@ -21,6 +21,7 @@ CONFIG_DIR="${CCS_CONFIG_DIR:-$HOME/.config/ccs}"
 command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 command -v claude >/dev/null 2>&1 || PATH="$HOME/.local/bin:$PATH"
 export CCS_BRIDGE=1
+export CCS_PROVIDER=claude
 export CCS_FLAGS="$*"   # launch flags, so the daemon can replay them on resume
 # Never trust an inherited CCS_TMUX: env leaks (open/Ghostty windows spawned
 # from a bridged shell) made new sessions claim ANOTHER session's tmux, so

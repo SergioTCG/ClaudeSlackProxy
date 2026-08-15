@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+import path from 'node:path'
+
+function usage(stream = process.stdout) {
+  stream.write('Usage: sab-upload --grant TOKEN -- FILE_PATH [FILE_PATH ...]\n')
+}
+
+function fail(message, status = 2) {
+  process.stderr.write(`sab-upload: ${message}\n`)
+  process.exit(status)
+}
+
+const args = process.argv.slice(2)
+if (args.includes('-h') || args.includes('--help')) {
+  usage()
+  process.exit(0)
+}
+
+let grant = ''
+const files = []
+let pathsOnly = false
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i]
+  if (pathsOnly) { files.push(arg); continue }
+  if (arg === '--') { pathsOnly = true; continue }
+  if (arg === '--grant') {
+    if (!args[i + 1]) fail('--grant requires a token')
+    grant = args[++i]
+    continue
+  }
+  if (arg.startsWith('--grant=')) {
+    grant = arg.slice('--grant='.length)
+    continue
+  }
+  if (arg.startsWith('-')) fail(`unknown option: ${arg}`)
+  files.push(arg)
+}
+
+if (!process.env.CCS_BRIDGE || !process.env.CCS_TMUX) {
+  fail('this command must run inside a live Slack Agent Bridge session')
+}
+if (!grant) fail('missing --grant TOKEN')
+if (!files.length) fail('provide at least one file path')
+
+const defaultEndpoint = 'http://127.0.0.1:8877/artifact/upload'
+if (process.env.CCS_UPLOAD_ENDPOINT && process.env.NODE_ENV !== 'test') {
+  fail('CCS_UPLOAD_ENDPOINT is reserved for tests')
+}
+const endpoint = new URL(process.env.CCS_UPLOAD_ENDPOINT || defaultEndpoint)
+endpoint.searchParams.set('ppid', String(process.ppid))
+endpoint.searchParams.set('tmux', process.env.CCS_TMUX)
+
+let response
+try {
+  response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-ccs-provider': process.env.CCS_PROVIDER === 'codex' ? 'codex' : 'claude',
+    },
+    body: JSON.stringify({ grant, paths: files.map(file => path.resolve(file)) }),
+    signal: AbortSignal.timeout(10 * 60 * 1000),
+  })
+} catch (error) {
+  fail(`could not reach the local bridge daemon (${error?.message || error})`, 1)
+}
+
+let result = {}
+try { result = await response.json() } catch {}
+if (!response.ok || !result.ok) fail(result.error || `upload failed with HTTP ${response.status}`, 1)
+const names = Array.isArray(result.filenames) ? result.filenames.join(', ') : 'artifact'
+process.stdout.write(`Uploaded ${names} to Slack.\n`)

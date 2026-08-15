@@ -27,7 +27,8 @@ accounts, and the Mac user running the daemon.
   owner-only.
 - Session channels are private. The owner may explicitly allow collaborators to
   send labelled prompts to a live session; collaborators cannot run commands,
-  answer permissions, or resurrect the session.
+  answer permissions, or resurrect the session. Their accepted prompts may ask
+  the live agent to return generated workspace artifacts to that same channel.
 - Workspace administrators may have powers that bypass ordinary private-channel
   expectations or impersonate/recover accounts. Do not use an untrusted
   workspace.
@@ -47,6 +48,13 @@ accounts, and the Mac user running the daemon.
   `$HOME`. Claude and Codex use separate remote-flag allowlists.
 - **Provider isolation:** `/cc-*` can affect only Claude sessions and
   `/codex-*` only Codex sessions. Cross-provider flags are rejected.
+- **Capability-bound file egress:** an accepted Slack prompt creates an opaque,
+  one-use upload grant lasting at most two hours. It is bound to that sender,
+  message, provider, live process/tmux session, channel, and canonical workspace.
+  The agent cannot select another Slack destination. Realpath checks reject
+  traversal and symlink escapes; only regular files are accepted, with ten-file
+  and 100 MiB aggregate limits. Successful grants cannot be replayed, and all
+  outstanding grants disappear when the daemon restarts.
 - **Explicit Codex hook trust:** setup never bypasses Codex's hash-based hook
   review. Changed hooks require local review through `/hooks`.
 - **Failure-safe permission relay:** if Codex cannot obtain a Slack verdict, the
@@ -75,6 +83,8 @@ was deliberately launched in dangerous mode.
 - Regularly inspect private-channel membership and collaborator allowlists.
 - Remember that mirrored prompts, responses, filenames, and attachments are
   stored under the Slack workspace's retention and administration policies.
+- Treat artifact requests as deliberate data egress. Review collaborator access
+  before asking an agent to send generated files containing proprietary data.
 
 ## Tokens and local files
 

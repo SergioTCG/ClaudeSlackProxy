@@ -30,3 +30,10 @@ test('daemon-spawned sessions use canonical sab launchers', () => {
   const util = fs.readFileSync(path.join(root, 'daemon', 'util.mjs'), 'utf8')
   assert.match(util, /provider === 'codex' \? 'sab-codex' : 'sab-cc'/)
 })
+
+test('canonical launchers export an authoritative provider for shared helpers', () => {
+  const claude = fs.readFileSync(path.join(root, 'bin', 'sab-cc'), 'utf8')
+  const codex = fs.readFileSync(path.join(root, 'bin', 'sab-codex'), 'utf8')
+  assert.match(claude, /export CCS_PROVIDER=claude/)
+  assert.match(codex, /export CCS_PROVIDER=codex/)
+})

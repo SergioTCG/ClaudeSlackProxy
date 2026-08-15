@@ -15,8 +15,9 @@ These public interfaces are compatibility-sensitive:
 - `/cc-*` always selects Claude Code; `/codex-*` always selects Codex.
 - Missing `session.provider` means Claude. Never bulk-migrate old state merely
   to make provider fields explicit.
-- `sab-cc` and `sab-codex` are the canonical provider launchers. `ccs` and
-  `ccs-codex` remain compatibility aliases throughout 1.x.
+- `sab-cc` and `sab-codex` are the canonical provider launchers. `sab-upload`
+  is the shared artifact-return helper. `ccs` and `ccs-codex` remain
+  compatibility aliases throughout 1.x.
 - `ccs-account`, `ccs-spawn`, internal `ccs-*` tmux names, and `CCS_*` remain
   stable until a separately designed migration justifies changing them.
 - Configuration and state remain in `~/.config/ccs`; the local HTTP port remains
@@ -54,6 +55,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Codex inbound messages use tmux; lifecycle hooks provide stable outbound final
   text and permission decisions. Never parse Codex transcript JSONL directly;
   usage telemetry may enter only through `ccusage`'s public JSON adapter.
+- Generated-file delivery is provider-neutral. The daemon, not the agent,
+  chooses the Slack destination from a short-lived grant tied to an accepted
+  Slack message and its live session.
 - A provider namespace is authoritative. Reject a command or flag that belongs
   to the other provider before it can mutate a session.
 - Hook handlers must remain quick, bounded, and failure-tolerant. A hook or Slack
@@ -76,6 +80,12 @@ Collaborators may send labelled prompts only to a live, explicitly allowed
 session. Spawned working directories must remain contained under the user's
 home directory, and remote launch flags must use provider-specific allowlists.
 
+Artifact uploads must require an owner or per-channel collaborator message,
+live process/tmux proof, and a one-use expiring grant. Resolve every file's real
+path and keep it inside the workspace captured by that grant; reject missing,
+non-regular, escaped, oversized, or replayed uploads. Agents never select a
+channel ID or arbitrary destination.
+
 ## Development workflow
 
 1. Start from a clean branch or isolated worktree and inspect unrelated changes.
@@ -94,7 +104,7 @@ npm ci
 npm run audit
 npm test
 npm run check
-for file in daemon/*.mjs channel/*.mjs scripts/*.mjs; do node --check "$file"; done
+for file in daemon/*.mjs channel/*.mjs scripts/*.mjs bin/sab-upload; do node --check "$file"; done
 shellcheck -S warning bin/sab-cc bin/sab-codex \
   bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
   bin/ccs-spawn bin/ccs-window hooks/hook.sh hooks/codex-hook.sh \

@@ -13,7 +13,7 @@ Slack (private channels, Socket Mode)
    │▼
 ┌────────────────────────── Mac Studio ──────────────────────────┐
 │  daemon/daemon.mjs  ← launchd, owns the ONE Socket Mode conn   │
-│    • HTTP 127.0.0.1:8877  (hooks/permissions in, Claude SSE)   │
+│    • HTTP 127.0.0.1:8877  (hooks, permissions, uploads, SSE)   │
 │    • state.json  (session ↔ provider ↔ channel ↔ pid ↔ tmux)   │
 │    • lifecycle, mirroring, status, resurrection, ./commands    │
 │         ▲ POST /hook              ▲ GET /channel/stream (SSE)  │
@@ -22,6 +22,7 @@ Slack (private channels, Socket Mode)
 │         │                          │ notifications/claude/…    │
 │  Ghostty → tmux ─┬→ bin/sab-cc → Claude + MCP Channel          │
 │                  └→ bin/sab-codex → Codex + lifecycle hooks    │
+│                         └→ bin/sab-upload → authorized artifact │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -34,6 +35,10 @@ Slack (private channels, Socket Mode)
 - **`bin/sab-codex`** — the Codex launcher. It uses the same tmux invariant,
   exports `CCS_PROVIDER=codex`, and binds F12 to Codex `interrupt_turn`. It does
   not load Claude's MCP server or consent watcher. `bin/ccs-codex` forwards to it.
+- **`bin/sab-upload`** — a provider-neutral agent helper. It submits generated
+  file paths to the loopback daemon with the session's provider/tmux identity
+  and a one-use grant supplied only by an accepted Slack prompt. It cannot
+  choose a channel or user.
 - **`hooks/hook.sh`** — registered globally for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`. Exits instantly unless `CCS_BRIDGE=1` (non-bridged sessions pay zero cost). Otherwise POSTs the hook JSON + `ppid` + `tmux` name to the daemon (curl, ≤2s cap, always exit 0 — hooks are synchronous).
 - **`hooks/codex-hook.sh`** — separately registered and gated by `CCS_PROVIDER=codex`. Lifecycle events post to the daemon; `PermissionRequest` waits for a Slack verdict and emits the documented Codex decision JSON. Failure returns no decision, preserving the local approval flow.
 - **Codex resurrection bootstrap** — `codex resume` receives the first queued
@@ -65,6 +70,14 @@ Slack (private channels, Socket Mode)
    channel ID lives in state, so the public rename never creates a duplicate.
    It accepts `/cc-new` or `/codex-new`, provider-filtered status, and help.
    Session channels accept plain messages plus their provider namespace.
+9. **Capability-bound artifact return.** Every accepted owner or per-channel
+   collaborator prompt receives an opaque two-hour grant in the injected agent
+   context. `sab-upload` proves live process/tmux ownership; the daemon binds
+   the grant to the sender, session, provider, channel, message, and canonical
+   workspace. A successful upload consumes the grant. Up to ten regular files
+   totaling 100 MiB may be sent in one call; realpath containment rejects
+   traversal and symlink escapes. Slack failures and path corrections remain
+   retryable until expiry. Grants intentionally do not survive daemon restarts.
 
 ## Command grammar (Slack)
 
@@ -72,7 +85,7 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 
 | Command | Where | Effect |
 |---|---|---|
-| plain text | session channel | injected into the session (resurrects it first if needed) |
+| plain text | session channel | injected into the session (resurrects it first if needed); explicit requests may return generated workspace files |
 | `/cc-new [folder] [flags]`, `/codex-new [folder] [flags]` | anywhere | provider-specific project picker or Ghostty+tmux spawn (allowlisted flags, under `$HOME`) |
 | `/cc-model`, `/cc-effort`, `/cc-flags`, `/cc-update` | Claude session | inspect/change Claude settings; restart/resume where required |
 | `/codex-model`, `/codex-effort`, `/codex-flags`, `/codex-update` | Codex session | inspect/change Codex settings; restart/resume where required |

@@ -4,6 +4,25 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0-rc.1] — 2026-08-15
+
+### Added
+- **Generated artifact delivery.** Authorized owner and per-channel collaborator
+  prompts can ask Claude Code or Codex to return generated files through the new
+  provider-neutral `sab-upload` helper and Slack's current `filesUploadV2` flow.
+- Upload capabilities are opaque, one-use, two-hour grants bound to the Slack
+  sender/message, provider, live process/tmux session, immutable channel, and
+  canonical workspace. The daemon rejects replay, concurrency, traversal,
+  symlink escape, non-regular files, more than ten files, or more than 100 MiB.
+
+### Compatibility
+- The existing Slack app already has `files:write`; no manifest update,
+  reauthorization, token, command, event, configuration, state, channel, hook,
+  provider launcher, or LaunchAgent migration is required. Rerunning the local
+  installer adds `sab-upload` to `PATH`.
+
+[1.3.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.3.0-rc.1
+
 ## [1.2.0] — 2026-08-14
 
 ### Released

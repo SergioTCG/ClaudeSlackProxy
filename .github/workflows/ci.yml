@@ -25,7 +25,7 @@ jobs:
         run: npm run audit
       - name: Syntax-check JavaScript
         run: |
-          for file in daemon/*.mjs channel/*.mjs scripts/*.mjs spike/*.mjs; do
+          for file in daemon/*.mjs channel/*.mjs scripts/*.mjs spike/*.mjs bin/sab-upload; do
             node --check "$file"
           done
       - name: Test
