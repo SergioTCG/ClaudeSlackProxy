@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Slack Agent Bridge daemon. Owns the Socket Mode connection and bridge logic.
 import http from 'node:http'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { WebClient } from '@slack/web-api'
 import { SocketModeClient } from '@slack/socket-mode'
 import {
-  BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState,
+  BRIDGE, CONFIG_DIR, log, sleep, loadEnv, loadState, saveState, saveStateNow,
   resolveClaudePid, resolveAgentPid, pidAlive, gitInfo, gitStatusText, gitBranch, channelName,
   tmuxSendCommand, tmuxAlive, tmuxKill, tmuxCapture, tmuxInterrupt, tmuxPaste,
   ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle, safeAccount,
@@ -18,6 +19,7 @@ import {
   codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
+  switchTargetLaunch,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createTopicSync } from './topic.mjs'
@@ -29,6 +31,18 @@ import {
   codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus, formatTokens,
   usageCost, usageDate, usageRows,
 } from './usage.mjs'
+import {
+  beginTransition, commitTransition, deleteLineage, enqueueTransitionItem, ensureLineage, lineageFor, otherProvider,
+  rebindLineageSession, recoveryDecision, rollbackTransition, setTransitionPhase, transitionForSession, transitionForTarget,
+  standbyForSession,
+} from './lineage.mjs'
+import {
+  deleteHandoffs, handoffPrompt, readHandoff, targetBootstrapPrompt, validateBootstrapReply, writeHandoff,
+} from './handoffs.mjs'
+import {
+  deterministicWrapperPatch, fingerprintsMatch, inspectInstructions, instructionProposalPrompt,
+  readInstructionProposal, validateInstructionPatch, validateInstructionResult, writeInstructionProposal,
+} from './instructions.mjs'
 
 loadEnv()
 let USER = process.env.SLACK_USER_ID // unset on fresh installs until /cc-claim
@@ -124,6 +138,20 @@ function sessionByPid(pid) {
 function sessionByChannel(ch) {
   const sid = state.channels[ch]
   return sid ? state.sessions[sid] : null
+}
+const switchingSids = new Set() // suppress lifecycle noise from a leg intentionally being replaced
+const internalTurns = new Map() // sid → private handoff/proposal turn resolver
+const targetValidationWaiters = new Map() // transition id → private target readiness resolver
+
+function activeTransition(channel) {
+  return lineageFor(state, channel)?.transition || null
+}
+
+function queueDuringTransition(channel, item) {
+  const transition = activeTransition(channel)
+  const position = enqueueTransitionItem(transition, item)
+  saveStateNow(state)
+  return position
 }
 // ---- collaborators: a per-channel whitelist of Slack users allowed to post ---
 const nameCache = new Map()
@@ -612,6 +640,45 @@ function readNewAssistantText(session) {
   return out.join('\n\n')
 }
 
+async function privateAssistantText(session, body = {}) {
+  stopPoller(session)
+  await clearStatus(session)
+  await clearQuestionForm(session)
+  if (providerOf(session) === 'codex') {
+    const turnId = body.turn_id || null
+    if (turnId) session.lastMirroredTurn = turnId
+    return String(body.last_assistant_message || '').trim()
+  }
+  if (session.transcript) await waitTranscriptSettle(session.transcript)
+  return readNewAssistantText(session).trim()
+}
+
+async function completePrivateTurn(session, body, targetClaim = null) {
+  const direct = internalTurns.get(session.id)
+  const target = targetClaim && targetValidationWaiters.get(targetClaim.transition.id)
+  const waiter = direct || target
+  if (!waiter) return false
+  const text = await privateAssistantText(session, body)
+  if (direct) internalTurns.delete(session.id)
+  else targetValidationWaiters.delete(targetClaim.transition.id)
+  clearTimeout(waiter.timer)
+  waiter.resolve(text)
+  saveState(state)
+  return true
+}
+
+function failPrivateTurn(session, error, targetClaim = null) {
+  const direct = internalTurns.get(session.id)
+  const target = targetClaim && targetValidationWaiters.get(targetClaim.transition.id)
+  const waiter = direct || target
+  if (!waiter) return false
+  if (direct) internalTurns.delete(session.id)
+  else targetValidationWaiters.delete(targetClaim.transition.id)
+  clearTimeout(waiter.timer)
+  waiter.reject(error instanceof Error ? error : new Error(String(error)))
+  return true
+}
+
 // ---- hook handling ----------------------------------------------------------
 // A session's tmux claim is only trusted if the claiming claude process really
 // lives inside that tmux (its pid descends from one of the session's panes).
@@ -647,6 +714,11 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   if (tmux && !(await validTmuxClaim(pid, tmux))) tmux = null
   const sid = body.session_id
   if (!sid) return
+  const targetClaim = transitionForTarget(state, provider, tmux)
+  if (targetClaim?.transition.target.sid && targetClaim.transition.target.sid !== sid) {
+    log('rejected switch target session mismatch', String(sid).slice(0, 8), 'expected', targetClaim.transition.target.sid.slice(0, 8))
+    return
+  }
 
   let session = state.sessions[sid] || sessionByPid(pid)
   if (session && isSupersededHook(ev, session.pid, pid)) {
@@ -688,6 +760,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   // session's channel and orphan it. Require the payload's own transcript to belong
   // to the new id, and require the same terminal.
   if (session.id !== sid) {
+    const priorSid = session.id
     const transcriptMatches = provider === 'codex' || !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
     const sameTerminal = !tmux || !session.tmux || tmux === session.tmux
     if (!transcriptMatches || !sameTerminal) {
@@ -697,6 +770,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     }
     delete state.sessions[session.id]
     if (session.channel) state.channels[session.channel] = sid
+    rebindLineageSession(state, priorSid, sid, provider)
+    if (internalTurns.has(priorSid)) {
+      internalTurns.set(sid, internalTurns.get(priorSid)); internalTurns.delete(priorSid)
+    }
     session.id = sid
     session.offset = 0
     state.sessions[sid] = session
@@ -722,13 +799,38 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   }
   const acct = provider === 'claude' ? safeAccount(account) : null
   if (acceptSettings && acct && session.account !== acct) session.account = acct // which subscription pays for this session
-  saveState(state)
+  if (targetClaim) {
+    targetClaim.transition.target.sid = sid
+    targetClaim.transition.target.startedAt = targetClaim.transition.target.startedAt || Date.now()
+    targetClaim.lineage.legs[provider] = sid
+    saveStateNow(state)
+  } else saveState(state)
+
+  const standby = !targetClaim && standbyForSession(state, sid)
+  if (standby) {
+    // A preserved native leg is deliberately dormant. A trailing hook from the
+    // process just switched away from—or a manual attempt to start that leg—
+    // must not create a second channel or race the active provider for input.
+    stopPoller(session)
+    await clearStatus(session)
+    if (ev === 'SessionStart') {
+      if (session.tmux) await tmuxKill(session.tmux)
+      if (session.pid && pidAlive(session.pid)) { try { process.kill(session.pid) } catch {} }
+      await post(standby.channel, `⚠️ Blocked a second live ${providerLabel(provider)} leg. Use ${slackCommand(standby.lineage.activeProvider, 'switch')} in this channel to activate it safely.`).catch(() => {})
+    }
+    session.pid = null
+    saveStateNow(state)
+    return
+  }
 
   if (ev === 'SessionStart') {
     restarting.delete(sid) // a resumed /cc-update session is up; re-enable the "ended" notice
     resurrectInFlight.delete(sid) // the wake completed; future resurrects are legitimate
     if (session.tmux) clearKillOnClose(session.tmux) // window close must NOT kill the session (Ghostty single-instance cascade)
     if (session.tmux) tmuxTitle(session.tmux, session.cwd || 'ccs') // initial title; updateTopic enriches it (folder · branch · model · effort)
+    // A switch target is provisional until its private handoff-readiness turn
+    // succeeds. Never create/rebind a Slack channel or mirror startup noise yet.
+    if (targetClaim) return
     const ch = await ensureChannel(session)
     await updateTopic(session) // existing channels also need fresh SessionStart metadata
     const src = body.source
@@ -750,6 +852,10 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     return
   }
   if (ev === 'UserPromptSubmit') {
+    if (targetClaim || internalTurns.has(session.id)) {
+      consumeInjected(sid, (body.prompt || '').trim())
+      return
+    }
     const ch = session.channel || (await ensureChannel(session))
     const p = (body.prompt || '').trim()
     // Mirror only genuine typing: skip Slack-injected prompts (already shown) and
@@ -766,12 +872,14 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     // shows the turn unfolding. Clearing the status lets the poller repost the
     // live spinner below the new prose on its next tick.
     if (provider !== 'claude') return
+    if (targetClaim || internalTurns.has(session.id)) return
     const text = readNewAssistantText(session)
     if (text) { await clearStatus(session); await postMd(session.channel, text) }
     return
   }
   if (ev === 'Stop') {
     log('stop hook', session.id.slice(0, 8))
+    if (await completePrivateTurn(session, body, targetClaim)) return
     if (provider === 'codex') await finalizeCodexTurn(session, body)
     else await finalizeTurn(session)
     return
@@ -779,9 +887,21 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   if (ev === 'SessionEnd') {
     stopPoller(session)
     await clearStatus(session)
-    if (session.channel && !restarting.has(sid)) await post(session.channel, '💤 *Session ended* — write here to resume it')
+    const failedPrivate = failPrivateTurn(session, new Error('agent session ended during a private bridge turn'), targetClaim)
+    const switching = transitionForSession(state, sid)
+    if (session.channel && !restarting.has(sid) && !switchingSids.has(sid) && !switching) {
+      await post(session.channel, '💤 *Session ended* — write here to resume it')
+    }
     clearPermissionsForPid(session.pid, 'session ended')
     session.pid = null
+    if (switching?.transition.source.sid === sid && !failedPrivate && !switchingSids.has(sid) &&
+        ['preflight', 'aligning'].includes(switching.transition.phase)) {
+      rollbackTransition(state, switching.channel, 'source session ended before provider handoff')
+      saveStateNow(state)
+      await post(switching.channel, '↩️ Provider switch cancelled because the source session ended before handoff capture. The channel remains on the source leg; write here to resume it.')
+      await flushTransitionQueue(switching.channel)
+      return
+    }
     saveState(state)
     return
   }
@@ -999,6 +1119,414 @@ async function resurrect(session, text) {
 }
 const pendingBySid = new Map()
 
+function waitForPrivateTurn(map, key, timeoutMs = 5 * 60000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      map.delete(key)
+      reject(new Error('private bridge turn timed out'))
+    }, timeoutMs)
+    map.set(key, { resolve, reject, timer })
+  })
+}
+
+async function capturePrivateTurn(session, prompt) {
+  if (!session?.tmux || !(await tmuxAlive(session.tmux))) throw new Error('source terminal is unavailable')
+  const result = waitForPrivateTurn(internalTurns, session.id)
+  rememberInjected(session.id, prompt)
+  try { await tmuxPaste(session.tmux, prompt) }
+  catch (error) {
+    const waiter = internalTurns.get(session.id)
+    if (waiter) { clearTimeout(waiter.timer); internalTurns.delete(session.id); waiter.reject(error) }
+  }
+  return result
+}
+
+async function captureTargetValidation(transition, prompt) {
+  if (!transition?.target?.tmux || !(await tmuxAlive(transition.target.tmux))) throw new Error('target terminal is unavailable')
+  const result = waitForPrivateTurn(targetValidationWaiters, transition.id)
+  if (transition.target.sid) rememberInjected(transition.target.sid, prompt)
+  try { await tmuxPaste(transition.target.tmux, prompt) }
+  catch (error) {
+    const waiter = targetValidationWaiters.get(transition.id)
+    if (waiter) { clearTimeout(waiter.timer); targetValidationWaiters.delete(transition.id); waiter.reject(error) }
+  }
+  return result
+}
+
+function auxiliaryEnv() {
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) if (/^CCS_/.test(key)) delete env[key]
+  for (const key of ['CODEX_THREAD_ID', 'CODEX_TURN_ID', 'CODEX_SESSION_ID']) delete env[key]
+  return env
+}
+
+function runWithInput(bin, args, { cwd, input, timeout = 180000, maxBuffer = 2 << 20 }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env: auxiliaryEnv(), stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = '', stderr = '', size = 0, settled = false, timer = null
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true; clearTimeout(timer)
+      if (error) reject(error); else resolve(value)
+    }
+    const collect = target => chunk => {
+      size += chunk.length
+      if (size > maxBuffer) { child.kill(); finish(new Error('instruction proposal output exceeded its limit')); return }
+      if (target === 'out') stdout += chunk
+      else stderr += chunk
+    }
+    child.stdout.on('data', collect('out'))
+    child.stderr.on('data', collect('err'))
+    child.stdin.on('error', error => finish(error))
+    child.on('error', error => finish(error))
+    child.on('close', code => code === 0
+      ? finish(null, stdout.trim())
+      : finish(new Error((stderr || stdout || `agent exited ${code}`).trim().slice(0, 1000))))
+    timer = setTimeout(() => { child.kill(); finish(new Error('instruction proposal agent timed out')) }, timeout)
+    child.stdin.end(input)
+  })
+}
+
+function extractUnifiedPatch(output) {
+  const text = String(output || '').trim()
+  const fenced = [...text.matchAll(/```(?:diff|patch)?\s*\n([\s\S]*?)```/gi)]
+    .map(match => match[1]).find(value => /^(?:diff --git |--- (?:a\/|\/dev\/null))/m.test(value))
+  const candidate = (fenced || text).trim()
+  const at = candidate.search(/^(?:diff --git |--- (?:a\/|\/dev\/null))/m)
+  return at >= 0 ? candidate.slice(at).trim() + '\n' : candidate + '\n'
+}
+
+async function generateInstructionProposal(preflight, provider) {
+  if (preflight.kind === 'agents_only' && !preflight.oversize) return deterministicWrapperPatch(preflight)
+  const prompt = instructionProposalPrompt(preflight)
+  const output = provider === 'codex'
+    ? await runWithInput(codexBin(), ['exec', '--sandbox', 'read-only', '--ephemeral', '--color', 'never', '--skip-git-repo-check', '-'], {
+      cwd: preflight.root, input: prompt,
+    })
+    : await runWithInput(claudeBin(), [
+      '--print', '--permission-mode', 'plan', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit',
+      '--no-session-persistence',
+    ], { cwd: preflight.root, input: prompt })
+  return extractUnifiedPatch(output)
+}
+
+async function validateInstructionPatchResult(preflight, patch) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  const temp = fs.mkdtempSync(path.join(CONFIG_DIR, 'instruction-check-'))
+  try {
+    await execFile('git', ['init', '--quiet', temp])
+    for (const file of [preflight.agents, preflight.claude]) {
+      if (file?.exists && file.content != null) fs.writeFileSync(path.join(temp, file.name), file.content, { mode: 0o600 })
+    }
+    const patchFile = path.join(temp, 'proposal.patch')
+    fs.writeFileSync(patchFile, patch, { mode: 0o600 })
+    await execFile('git', ['-C', temp, 'apply', '--whitespace=nowarn', patchFile])
+    return validateInstructionResult(temp)
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+}
+
+function switchBlockReason(session, channel, { allowCurrentTransition = false } = {}) {
+  if (!allowCurrentTransition && activeTransition(channel)) return 'A provider switch is already in progress in this channel.'
+  if (!(session?.pid && pidAlive(session.pid) && session.tmux)) return 'Wake the session first; provider switching requires an active, idle source.'
+  if (pollers.has(session.id) || codexPollers.has(session.id)) return 'Wait for the current agent turn to finish before switching providers.'
+  if (qforms.has(session.id)) return 'Answer or dismiss the open question before switching providers.'
+  if (hasPendingPerm(session)) return 'Resolve the open permission request before switching providers.'
+  if (internalTurns.has(session.id)) return 'The bridge is already running a private maintenance turn.'
+  return null
+}
+
+function instructionSummary(preflight) {
+  if (preflight.kind === 'aligned') return '✅ `AGENTS.md` is canonical and `CLAUDE.md` already references it.'
+  if (preflight.kind === 'none') return 'ℹ️ No root `AGENTS.md` or `CLAUDE.md`; nothing to align.'
+  if (preflight.kind === 'non_git') return '⚠️ Non-Git folder; automatic instruction alignment is disabled.'
+  if (preflight.reason) return `⚠️ ${preflight.reason}. You may switch without changing instructions.`
+  if (preflight.oversize) return `📝 \`AGENTS.md\` exceeds Codex's ${32 * 1024}-byte project budget; the bridge can propose a compact reconciliation.`
+  if (preflight.kind === 'agents_only') return '📝 `CLAUDE.md` is missing; the bridge can add a thin wrapper pointing to `AGENTS.md`.'
+  if (preflight.kind === 'claude_only') return '📝 Only `CLAUDE.md` exists; the bridge can propose a canonical `AGENTS.md` plus a thin Claude wrapper.'
+  return '📝 `AGENTS.md` and `CLAUDE.md` diverge; the bridge can propose a reviewed reconciliation.'
+}
+
+function switchActionBlocks(transition, preflight, stage = 'preview') {
+  const actions = []
+  const button = (text, action, style) => ({
+    type: 'button', text: { type: 'plain_text', text }, action_id: 'provider_switch',
+    value: `switch:${transition.id}:${action}`, ...(style ? { style } : {}),
+  })
+  if (stage === 'proposal') actions.push(button('Apply and switch', 'apply', 'primary'), button('Switch without applying', 'continue'))
+  else {
+    if (preflight.safeToPropose) actions.push(button('Align instructions', 'align', 'primary'))
+    actions.push(button(`Switch to ${providerLabel(transition.target.provider)}`, 'continue', preflight.safeToPropose ? undefined : 'primary'))
+  }
+  actions.push(button('Cancel', 'cancel', 'danger'))
+  return [{ type: 'actions', block_id: `provider_switch_${transition.id}`, elements: actions }]
+}
+
+function scheduleSwitchPreviewExpiry(channel, transitionId, expectedUpdatedAt) {
+  setTimeout(async () => {
+    const lineage = lineageFor(state, channel)
+    const transition = lineage?.transition
+    if (!transition || transition.id !== transitionId || transition.phase !== 'preflight' || transition.updatedAt !== expectedUpdatedAt) return
+    rollbackTransition(state, channel, 'provider switch preview expired')
+    saveStateNow(state)
+    await post(channel, '⌛ Provider-switch preview expired; the source remains active.').catch(() => {})
+    await flushTransitionQueue(channel)
+  }, 30 * 60000)
+}
+
+async function beginProviderSwitch(channel, source, { replaceMissing = false } = {}) {
+  const blocker = switchBlockReason(source, channel)
+  if (blocker) return post(channel, `⚠️ ${blocker}`)
+  if (!(await tmuxAlive(source.tmux))) return post(channel, '⚠️ The source terminal is gone. Write a message to resume it, then retry the switch.')
+  const lineage = ensureLineage(state, channel, source)
+  const targetProvider = otherProvider(providerOf(source))
+  const savedTargetSid = lineage.legs[targetProvider]
+  if (savedTargetSid && !state.sessions[savedTargetSid] && !replaceMissing) {
+    return post(channel, `⚠️ The saved ${providerLabel(targetProvider)} leg \`${savedTargetSid.slice(0, 8)}\` is missing from bridge state. Run \`${slackCommand(providerOf(source), 'switch')} new\` to explicitly replace it with a new native leg.`)
+  }
+  if (savedTargetSid && !state.sessions[savedTargetSid] && replaceMissing) {
+    lineage.legs[targetProvider] = null
+    saveStateNow(state)
+  }
+  const targetSession = lineage.legs[targetProvider] ? state.sessions[lineage.legs[targetProvider]] : null
+  if (targetSession?.pid && pidAlive(targetSession.pid)) {
+    return post(channel, `⚠️ The standby ${providerLabel(targetProvider)} leg is unexpectedly live. End it before switching.`)
+  }
+  const launch = switchTargetLaunch(targetProvider, targetSession, process.env)
+  const transition = beginTransition(state, channel, source, {
+    targetFlags: launch.effectiveFlags, targetKind: launch.kind,
+  })
+  transition.target.args = launch.args
+  const preflight = inspectInstructions(source.cwd)
+  transition.instructions = {
+    kind: preflight.kind, root: preflight.root, rootBytes: preflight.rootBytes || 0,
+    reason: preflight.reason || null, fingerprints: preflight.fingerprints || null,
+  }
+  saveStateNow(state)
+  const settings = targetSession
+    ? `resume native leg \`${targetSession.id.slice(0, 8)}\` · model \`${targetSession.model || readModel(targetSession) || 'default'}\` · effort \`${targetSession.effort || 'default'}\``
+    : 'create a new native leg'
+  const flags = launch.effectiveFlags.length ? launch.effectiveFlags.join(' ') : '(none)'
+  const text = `🔀 *Switch ${providerLabel(providerOf(source))} → ${providerLabel(targetProvider)}?*\n` +
+    `Target: ${settings}\nLaunch flags: \`${flags}\`\n${instructionSummary(preflight)}\n` +
+    '_The current provider remains active until a private handoff is safely captured._'
+  scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
+  return enqueue(channel, () => web.chat.postMessage({
+    channel, text,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }, ...switchActionBlocks(transition, preflight)],
+  }))
+}
+
+function transitionPreflight(transition) {
+  const current = inspectInstructions(transition.instructions?.root || state.sessions[transition.source.sid]?.cwd)
+  return current
+}
+
+async function proposeInstructionAlignment(channel, lineage, transition) {
+  setTransitionPhase(lineage, 'aligning')
+  saveStateNow(state)
+  await post(channel, '🧭 Preparing a read-only instruction reconciliation proposal…')
+  const preflight = transitionPreflight(transition)
+  if (!preflight.safeToPropose || !fingerprintsMatch({ root: preflight.root, fingerprints: transition.instructions.fingerprints })) {
+    throw new Error(preflight.reason || 'instruction files changed since the switch preview')
+  }
+  const patch = await generateInstructionProposal(preflight, transition.source.provider)
+  const checked = validateInstructionPatch(patch, preflight)
+  await validateInstructionPatchResult(preflight, checked.patch)
+  transition.instructions.proposal = writeInstructionProposal(CONFIG_DIR, channel, transition.id, checked.patch)
+  transition.instructions.proposal.touched = checked.touched
+  transition.instructions.proposedAt = Date.now()
+  setTransitionPhase(lineage, 'preflight')
+  saveStateNow(state)
+  scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
+  const shown = checked.patch.length > 12000 ? checked.patch.slice(0, 12000) + '\n… (proposal truncated in preview)' : checked.patch
+  const text = `📝 *Instruction reconciliation proposal*\n\`\`\`diff\n${shown}\`\`\`\n_Apply leaves these changes uncommitted for normal review._`
+  await enqueue(channel, () => web.chat.postMessage({
+    channel, text: 'Instruction reconciliation proposal ready.',
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: text.slice(0, 2950) } },
+      ...switchActionBlocks(transition, preflight, 'proposal'),
+    ],
+  }))
+  if (shown.length > 2800) await postMd(channel, `*Full instruction proposal*\n\n\`\`\`diff\n${shown}\`\`\``)
+}
+
+async function applyInstructionProposal(transition) {
+  const before = { root: transition.instructions.root, fingerprints: transition.instructions.fingerprints }
+  if (!fingerprintsMatch(before)) throw new Error('instruction files changed after the proposal; refusing to apply a stale patch')
+  const patch = readInstructionProposal(transition.instructions.proposal)
+  const preflight = inspectInstructions(transition.instructions.root)
+  validateInstructionPatch(patch, preflight)
+  await validateInstructionPatchResult(preflight, patch)
+  await execFile('git', ['-C', preflight.root, 'apply', '--check', '--whitespace=nowarn', transition.instructions.proposal.path])
+  await execFile('git', ['-C', preflight.root, 'apply', '--whitespace=nowarn', transition.instructions.proposal.path])
+  validateInstructionResult(preflight.root)
+  transition.instructions.appliedAt = Date.now()
+}
+
+async function flushTransitionQueue(channel) {
+  const lineage = lineageFor(state, channel)
+  while (lineage?.pendingDelivery?.length) {
+    const item = lineage.pendingDelivery[0]
+    try {
+      if (item.kind === 'attachments') await handleAttachments(channel, item.caption, item.files, null, item.request)
+      else await handleSlackMessage(channel, item.text, null, item.request)
+    } catch (error) {
+      log('queued switch delivery failed', channel, String(error))
+      break
+    }
+    lineage.pendingDelivery.shift()
+    saveStateNow(state)
+  }
+}
+
+async function rollbackProviderSwitch(channel, lineage, transition, error) {
+  try { setTransitionPhase(lineage, 'rolling_back', { error: String(error?.message || error).slice(0, 500) }); saveStateNow(state) } catch {}
+  const waiter = targetValidationWaiters.get(transition.id)
+  if (waiter) { clearTimeout(waiter.timer); targetValidationWaiters.delete(transition.id); waiter.reject(new Error('provider switch rolled back')) }
+  if (transition.target.tmux) await tmuxKill(transition.target.tmux)
+  const target = transition.target.sid ? state.sessions[transition.target.sid] : null
+  if (target) {
+    stopPoller(target); clearPermissionsForPid(target.pid, 'provider switch rolled back')
+    if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
+    target.pid = null; target.channel = null
+  }
+  const source = rollbackTransition(state, channel, error?.message || error)
+  switchingSids.delete(transition.source.sid)
+  saveStateNow(state)
+  await post(channel, `↩️ *Provider switch rolled back* — ${String(error?.message || error).slice(0, 300)}. The ${providerLabel(transition.source.provider)} leg remains authoritative.`)
+  if (lineage.pendingDelivery?.length) await flushTransitionQueue(channel)
+  else if (source && !(source.pid && pidAlive(source.pid))) await resurrect(source)
+}
+
+async function runProviderSwitch(channel, lineage, transition, { applyProposal = false } = {}) {
+  try {
+    const source = state.sessions[transition.source.sid]
+    let blocker = switchBlockReason(source, channel, { allowCurrentTransition: true })
+    if (!blocker) { await sleep(500); blocker = switchBlockReason(source, channel, { allowCurrentTransition: true }) }
+    if (blocker) throw new Error(blocker)
+    if (applyProposal) {
+      await applyInstructionProposal(transition)
+      await post(channel, '✅ Instruction proposal applied as uncommitted repository changes.')
+    }
+    setTransitionPhase(lineage, 'handoff')
+    saveStateNow(state)
+    await post(channel, `🧳 Capturing a private ${providerLabel(transition.source.provider)} handoff…`)
+    if (!source || !(source.pid && pidAlive(source.pid))) throw new Error('source session ended before handoff capture')
+    const handoffText = await capturePrivateTurn(source, handoffPrompt({
+      sourceProvider: transition.source.provider,
+      targetProvider: transition.target.provider,
+      latestUserIntent: `Switch this Slack session to ${providerLabel(transition.target.provider)} and continue the current task.`,
+    }))
+    const handoff = writeHandoff(CONFIG_DIR, channel, lineage.generation + 1, handoffText)
+    setTransitionPhase(lineage, 'handoff_ready', { handoff })
+    saveStateNow(state)
+
+    switchingSids.add(source.id)
+    stopPoller(source); await clearStatus(source); await clearQuestionForm(source)
+    clearPermissionsForPid(source.pid, 'switching provider')
+    if (source.tmux) await tmuxKill(source.tmux)
+    if (source.pid && pidAlive(source.pid)) { try { process.kill(source.pid) } catch {} }
+    source.pid = null
+
+    const tmuxName = `ccs-switch-${transition.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 18)}`
+    transition.target.tmux = tmuxName
+    const existingTarget = transition.target.sid ? state.sessions[transition.target.sid] : null
+    if (existingTarget) existingTarget.tmux = tmuxName
+    setTransitionPhase(lineage, 'target_starting')
+    saveStateNow(state)
+    await post(channel, `🚀 Starting the ${providerLabel(transition.target.provider)} leg for private validation…`)
+    await reapGhosttyZombies()
+    await ghosttySpawn({
+      cwd: source.cwd,
+      args: transition.target.args,
+      title: `sab ${path.basename(source.cwd)} (${providerCommand(transition.target.provider)})`,
+      tmuxName,
+      autoConsent: transition.target.provider === 'claude',
+      account: transition.target.provider === 'claude' ? existingTarget?.account : null,
+      provider: transition.target.provider,
+    })
+    let up = false
+    for (let i = 0; i < 40 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
+    if (!up) throw new Error('target terminal did not initialize')
+    setTransitionPhase(lineage, 'target_validating')
+    saveStateNow(state)
+    const content = readHandoff(handoff)
+    const reply = await captureTargetValidation(transition, targetBootstrapPrompt({
+      sourceProvider: transition.source.provider,
+      targetProvider: transition.target.provider,
+      handoff: content,
+      handoffPath: handoff.path,
+    }))
+    validateBootstrapReply(reply)
+    const target = transition.target.sid ? state.sessions[transition.target.sid] : null
+    if (!target || providerOf(target) !== transition.target.provider || !(target.pid && pidAlive(target.pid))) {
+      throw new Error('target did not establish a valid native session')
+    }
+    setTransitionPhase(lineage, 'committing')
+    saveStateNow(state)
+    commitTransition(state, channel, target)
+    if (target.tmux) state.channelTmux[channel] = target.tmux
+    artifactGrants.revoke({ sessionId: source.id, channelId: channel, provider: providerOf(source) })
+    saveStateNow(state)
+    switchingSids.delete(source.id)
+    await updateTopic(target)
+    await post(channel, `✅ *Switched to ${providerLabel(providerOf(target))}* — native session \`${target.id.slice(0, 8)}\` is now active. The ${providerLabel(providerOf(source))} leg is preserved as standby.`)
+    await flushTransitionQueue(channel)
+  } catch (error) {
+    log('provider switch failed', transition.id, String(error?.stack || error))
+    await rollbackProviderSwitch(channel, lineage, transition, error)
+  }
+}
+
+async function handleProviderSwitchAction(channel, transitionId, action) {
+  const lineage = lineageFor(state, channel)
+  const transition = lineage?.transition
+  if (!transition || transition.id !== transitionId) return post(channel, '⌛ This provider-switch action is stale.')
+  if (transition.phase !== 'preflight') return post(channel, `⏳ This switch is already in its \`${transition.phase}\` phase.`)
+  if (action === 'cancel') {
+    rollbackTransition(state, channel, 'cancelled by owner')
+    saveStateNow(state)
+    await post(channel, '✋ Provider switch cancelled; nothing was stopped or changed.')
+    return flushTransitionQueue(channel)
+  }
+  if (action === 'align') {
+    try { return await proposeInstructionAlignment(channel, lineage, transition) }
+    catch (error) {
+      rollbackTransition(state, channel, error?.message || error)
+      saveStateNow(state)
+      await post(channel, `❌ Instruction proposal failed safely: ${String(error?.message || error).slice(0, 400)}. No files were changed.`)
+      return flushTransitionQueue(channel)
+    }
+  }
+  if (action === 'apply' && !transition.instructions?.proposal) return post(channel, '⚠️ No instruction proposal is available to apply.')
+  if (!['apply', 'continue'].includes(action)) return
+  await runProviderSwitch(channel, lineage, transition, { applyProposal: action === 'apply' })
+}
+
+async function recoverProviderSwitches() {
+  for (const [channel, lineage] of Object.entries(state.lineages || {})) {
+    const transition = lineage.transition
+    if (!transition) continue
+    const alive = transition.target.tmux ? await tmuxAlive(transition.target.tmux) : false
+    const decision = recoveryDecision(transition, { targetTmuxAlive: alive })
+    if (decision.killTargetTmux) await tmuxKill(decision.targetTmux)
+    const target = transition.target.sid ? state.sessions[transition.target.sid] : null
+    if (target) { target.pid = null; target.channel = null }
+    const source = rollbackTransition(state, channel, 'daemon restarted during provider switch')
+    saveStateNow(state)
+    await post(channel, `↩️ Recovered an interrupted provider switch. ${providerLabel(transition.source.provider)} remains authoritative; the provisional target was discarded.`).catch(() => {})
+    if (lineage.pendingDelivery?.length) await flushTransitionQueue(channel)
+    else if (source && !(source.pid && pidAlive(source.pid)) && ['target_starting', 'target_validating', 'committing', 'rolling_back'].includes(transition.phase)) {
+      await resurrect(source).catch(error => log('switch recovery resume failed', String(error)))
+    }
+  }
+  for (const [channel, lineage] of Object.entries(state.lineages || {})) {
+    if (lineage.pendingDelivery?.length) await flushTransitionQueue(channel)
+  }
+}
+
 // /cc-update: stop this session's agent, update the CLI if a newer build exists,
 // then resume the same conversation with identical launch flags.
 async function updateAndRestart(session) {
@@ -1032,6 +1560,14 @@ async function updateAndRestart(session) {
 
 async function handleSlackMessage(channel, text, sender, request) {
   const trimmed = text.trim()
+
+  if (activeTransition(channel)) {
+    if (sender) return post(channel, `🔀 Provider switch in progress — <@${sender.id}>’s message was not delivered. Only owner messages are queued during the transition.`)
+    let position
+    try { position = queueDuringTransition(channel, { kind: 'message', text: trimmed, request }) }
+    catch { return post(channel, '⚠️ The provider-switch queue is full. Wait for the transition to finish, then resend this message.') }
+    return post(channel, `⏸️ Provider switch in progress — queued your message (${position}).`)
+  }
 
   // Collaborators may only send prompts into a LIVE session: no permission
   // verdicts, no commands, and no resurrection (that would spawn a terminal on
@@ -1130,6 +1666,17 @@ async function downloadSlackFile(url) {
 
 // Download files shared in a channel and inject them as local paths Claude can read.
 async function handleAttachments(channel, caption, files, sender, request) {
+  if (activeTransition(channel)) {
+    if (sender) return post(channel, `🔀 Provider switch in progress — <@${sender.id}>’s attachment was not delivered.`)
+    let position
+    const queuedFiles = files.map(file => ({
+      id: file.id, name: file.name, mimetype: file.mimetype, size: file.size,
+      url_private: file.url_private, url_private_download: file.url_private_download,
+    }))
+    try { position = queueDuringTransition(channel, { kind: 'attachments', caption, files: queuedFiles, request }) }
+    catch { return post(channel, '⚠️ The provider-switch queue is full. Wait for the transition to finish, then resend this attachment.') }
+    return post(channel, `⏸️ Provider switch in progress — queued your attachment (${position}).`)
+  }
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
   if (sender && !(session.pid && pidAlive(session.pid))) {
@@ -1480,7 +2027,7 @@ async function setCodexSetting(session, name, value) {
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
-const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags'])
+const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch'])
 const CLAUDE_ONLY_COMMANDS = new Set(['account'])
 const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
 
@@ -1492,6 +2039,7 @@ function commandHelp(provider) {
       '`/codex-update` — update Codex CLI and restart/resume this session\n' +
       '`/codex-flags [--yolo --search …]` — show or change Codex launch flags (restarts/resumes)\n' +
       '`/codex-stop` — interrupt the running turn\n' +
+      '`/codex-switch [new]` — hand this channel from Codex to Claude Code\n' +
       '`/codex-status` — session info here, or list Codex sessions from control\n' +
       '`/codex-usage [days [n] | models]` — Codex token and cost usage\n' +
       '`/codex-kill [here|<id>]` — end a Codex session (channel stays, resumable)\n' +
@@ -1505,6 +2053,7 @@ function commandHelp(provider) {
     '`/cc-account [name]` — choose the Claude subscription for this session\n' +
     '`/cc-flags [--dsp --chrome …]` — show or change Claude launch flags (restarts/resumes)\n' +
     '`/cc-stop` — interrupt the running turn\n' +
+    '`/cc-switch [new]` — hand this channel from Claude Code to Codex\n' +
     '`/cc-status` — session info here, or list Claude sessions from control\n' +
     '`/cc-usage [days [n] | models | limits]` — Claude usage and plan limits\n' +
     '`/cc-kill [here|<id>]` — end a Claude session (channel stays, resumable)\n' +
@@ -1526,6 +2075,17 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const actualProvider = providerOf(channelSession)
     return post(channel, `This is a ${providerLabel(actualProvider)} session. Use \`${slackCommand(actualProvider, name === 'restart' ? 'update' : name)}\` here.`)
   }
+  const channelTransition = activeTransition(channel)
+  if (channelTransition && SESSION_SCOPED_COMMANDS.has(name) && !['status', 'switch'].includes(name)) {
+    return post(channel, `⏳ Provider switch is in its \`${channelTransition.phase}\` phase. Wait for commit/rollback before changing or ending either native leg.`)
+  }
+  if (name === 'switch') {
+    if (!channelSession) return post(channel, `Use \`${cmd('switch')}\` in an active ${providerLabel(commandProvider)} session channel.`)
+    if (rest.length && !(rest.length === 1 && rest[0].toLowerCase() === 'new')) {
+      return post(channel, `Usage: \`${cmd('switch')}\` (or \`${cmd('switch')} new\` only when explicitly replacing a missing native target leg).`)
+    }
+    return beginProviderSwitch(channel, channelSession, { replaceMissing: rest[0]?.toLowerCase() === 'new' })
+  }
   if (name === 'status') {
     const session = channelSession
     if (session) {
@@ -1534,6 +2094,9 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
       const alive = session.pid && pidAlive(session.pid)
       const meta = sessionMeta.get(session.id) || {}
       const changes = gs ? `${gs.split('\n').length} file(s) changed` : '✓ clean'
+      const lineage = lineageFor(state, channel)
+      const standbyProvider = lineage ? otherProvider(lineage.activeProvider) : null
+      const standby = standbyProvider && lineage.legs[standbyProvider] ? state.sessions[lineage.legs[standbyProvider]] : null
       // Table cells are raw text (no markdown), so no backticks here.
       await postMd(channel,
         `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
@@ -1543,6 +2106,8 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
         `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
         `| Model | ${meta.model || readModel(session) || '—'} |\n` +
         `| Effort | ${meta.effort || session.effort || '—'} |\n` +
+        (standby ? `| Standby leg | ${providerLabel(standbyProvider)} · ${standby.id.slice(0, 8)} · ${standby.pid && pidAlive(standby.pid) ? '⚠️ unexpectedly live' : 'preserved'} |\n` : '') +
+        (lineage?.transition ? `| Transition | ${lineage.transition.phase} → ${providerLabel(lineage.transition.target.provider)} |\n` : '') +
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
       await web.chat.postMessage({ channel, text: 'Collaborators', blocks: await collabBlocks(channel) })
@@ -1550,7 +2115,8 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     }
     const rows = Object.values(state.sessions).filter(s => providerOf(s) === commandProvider).map(s => {
       const alive = s.pid && pidAlive(s.pid)
-      return `| ${path.basename(s.cwd)} | ${providerLabel(providerOf(s))} | ${s.id.slice(0, 8)} | ${alive ? '🟢 active' : '💤 dormant'} |`
+      const standby = !s.channel && Object.values(state.lineages || {}).some(lineage => lineage.legs?.[commandProvider] === s.id)
+      return `| ${path.basename(s.cwd)} | ${providerLabel(providerOf(s))} | ${s.id.slice(0, 8)} | ${standby ? '⏸️ standby' : alive ? '🟢 active' : '💤 dormant'} |`
     })
     return postMd(channel, `| Session | Provider | ID | State |\n|---|---|---|---|\n${rows.join('\n') || '| _none_ | | | |'}`)
   }
@@ -1588,9 +2154,10 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     if (!dead.length) return post(channel, 'No dormant channels to archive (skipping the one you’re in).')
     let n = 0
     for (const s of dead) {
-      try { await web.conversations.archive({ channel: s.channel }); n++ } catch (e) { log('archive failed', s.channel, e?.data?.error) }
-      delete state.channels[s.channel]
-      delete state.sessions[s.id]
+      try { await web.conversations.archive({ channel: s.channel }); n++ }
+      catch (e) { log('archive failed', s.channel, e?.data?.error); continue }
+      deleteLineage(state, s.channel)
+      deleteHandoffs(CONFIG_DIR, s.channel)
     }
     saveState(state)
     return post(channel, `🧹 Archived ${n} dormant channel(s). Note: archived channels can’t auto-resume — unarchive manually in Slack if you need one back.`)
@@ -2072,6 +2639,13 @@ sm.on('interactive', async ({ body, ack }) => {
       }
       return
     }
+    if (action.action_id === 'provider_switch') {
+      const [kind, transitionId, actionName] = String(action.value || '').split(':')
+      if (kind === 'switch' && transitionId && actionName) {
+        await handleProviderSwitchAction(body.channel?.id, transitionId, actionName)
+      }
+      return
+    }
     if (String(action.action_id || '').startsWith('qform_')) {
       const [, sid, n] = String(action.value || '').split(':')
       const session = state.sessions[sid]
@@ -2127,15 +2701,30 @@ setInterval(async () => {
   for (const s of Object.values(state.sessions)) {
     if (s.pid && !pidAlive(s.pid)) {
       log('sweep: pid dead', s.pid, s.id.slice(0, 8))
+      const switching = transitionForSession(state, s.id)
       stopPoller(s)
       clearPermissionsForPid(s.pid, 'session process exited')
       s.pid = null
+      if (switching?.transition.source.sid === s.id && ['preflight', 'aligning'].includes(switching.transition.phase)) {
+        rollbackTransition(state, switching.channel, 'source process exited before provider handoff')
+        saveStateNow(state)
+        await post(switching.channel, '↩️ Provider switch cancelled because the source process exited before handoff capture. The channel remains on the source leg; write here to resume it.').catch(() => {})
+        await flushTransitionQueue(switching.channel)
+        continue
+      }
+      if (switching?.transition.source.sid === s.id && switching.transition.phase === 'handoff') {
+        failPrivateTurn(s, new Error('source process exited during handoff capture'))
+      } else if (switching?.transition.target.sid === s.id) {
+        failPrivateTurn(s, new Error('target process exited during readiness validation'), switching)
+      }
       try {
         await clearStatus(s)
-        if (s.channel) await post(s.channel, '💤 *Session ended* — write here to resume it')
+        if (s.channel && !switchingSids.has(s.id) && !transitionForSession(state, s.id)) {
+          await post(s.channel, '💤 *Session ended* — write here to resume it')
+        }
       } catch (e) {
         if (e?.data?.error === 'is_archived') {
-          delete state.channels[s.channel]; delete state.sessions[s.id]
+          deleteLineage(state, s.channel)
           log('sweep: dropped session with archived channel', s.id.slice(0, 8))
         } else log('sweep post error:', e?.data?.error || String(e))
       }
@@ -2165,13 +2754,27 @@ setInterval(async () => {
     if (!winGoneSince.has(s.id)) { winGoneSince.set(s.id, Date.now()); continue }
     if (Date.now() - winGoneSince.get(s.id) < CLOSE_GRACE_MS) continue // maybe a spawn blip; wait it out
     log('terminal closed → ending session', s.id.slice(0, 8))
+    const switching = transitionForSession(state, s.id)
     winGoneSince.delete(s.id); winSawWindow.delete(s.id)
     if (s.tmux) await tmuxKill(s.tmux)
     if (s.pid && pidAlive(s.pid)) { try { process.kill(s.pid) } catch {} }
     stopPoller(s); await clearStatus(s)
     clearPermissionsForPid(s.pid, 'terminal closed')
     s.pid = null; saveState(state)
-    if (s.channel && !restarting.has(s.id)) { try { await post(s.channel, '💤 *Session ended* (terminal closed) — write here to resume it') } catch {} }
+    if (switching?.transition.source.sid === s.id && ['preflight', 'aligning'].includes(switching.transition.phase)) {
+      rollbackTransition(state, switching.channel, 'source terminal closed before provider handoff')
+      saveStateNow(state)
+      await post(switching.channel, '↩️ Provider switch cancelled because the source terminal closed. The channel remains on the source leg; write here to resume it.').catch(() => {})
+      await flushTransitionQueue(switching.channel)
+      continue
+    } else if (switching?.transition.source.sid === s.id && switching.transition.phase === 'handoff') {
+      failPrivateTurn(s, new Error('source terminal closed during handoff capture'))
+    } else if (switching?.transition.target.sid === s.id) {
+      failPrivateTurn(s, new Error('target terminal closed during readiness validation'), switching)
+    }
+    if (s.channel && !restarting.has(s.id) && !switchingSids.has(s.id) && !transitionForSession(state, s.id)) {
+      try { await post(s.channel, '💤 *Session ended* (terminal closed) — write here to resume it') } catch {}
+    }
   }
 }, 3000)
 
@@ -2218,6 +2821,7 @@ setInterval(async () => {
   }
   await sm.start()
   log('socket mode connected — bridge ready')
+  await recoverProviderSwitches()
   await readoptStatus() // recover live status for turns that were mid-flight on restart
   selfUpdate('boot').catch(e => log('self-update error', String(e)))
 })().catch(e => { log('BOOT FAILED', e); process.exit(1) })

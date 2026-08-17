@@ -48,13 +48,28 @@ accounts, and the Mac user running the daemon.
   `$HOME`. Claude and Codex use separate remote-flag allowlists.
 - **Provider isolation:** `/cc-*` can affect only Claude sessions and
   `/codex-*` only Codex sessions. Cross-provider flags are rejected.
+- **Transactional provider switch:** only the owner can confirm a switch. The
+  source remains authoritative until a target-native readiness turn succeeds;
+  target failure or daemon restart restores the source. Exact tmux/provider
+  claims fence stale and standby hooks from racing the active leg.
+- **Private, bounded handoffs:** provider handoffs exclude chain-of-thought,
+  credentials, tokens, complete transcripts, and large source dumps. They are
+  capped at 64 KiB, integrity checked, stored under `~/.config/ccs/handoffs`
+  with restrictive modes, and retained for two generations.
+- **Reviewed instruction changes:** automatic preflight reads only root
+  `AGENTS.md` and `CLAUDE.md`, never global provider memory. Proposed patches
+  are read-only until owner approval and are constrained by hashes, Git-root
+  paths, regular-file/symlink checks, binary/rename/mode rules, temporary apply
+  validation, `git apply --check`, and the Codex instruction-size budget.
 - **Capability-bound file egress:** an accepted Slack prompt creates an opaque,
   one-use upload grant lasting at most two hours. It is bound to that sender,
   message, provider, live process/tmux session, channel, and canonical workspace.
   The agent cannot select another Slack destination. Realpath checks reject
   traversal and symlink escapes; only regular files are accepted, with ten-file
   and 100 MiB aggregate limits. Successful grants cannot be replayed, and all
-  outstanding grants disappear when the daemon restarts.
+  outstanding grants disappear when the daemon restarts. A committed provider
+  switch also revokes grants issued to the source leg; queued owner messages
+  receive new target-bound grants after commit.
 - **Explicit Codex hook trust:** setup never bypasses Codex's hash-based hook
   review. Changed hooks require local review through `/hooks`.
 - **Failure-safe permission relay:** if Codex cannot obtain a Slack verdict, the
@@ -96,7 +111,9 @@ agent prompts, and never commit configuration backups.
 The app-level token can open the Socket Mode event stream; the bot token can act
 with the OAuth scopes declared in `slack/app-manifest.json`. Compromise of either
 requires immediate rotation. State maps local sessions, processes, paths, and
-Slack channel IDs and should also remain private.
+Slack channel IDs and should also remain private. During a provider transition,
+it temporarily journals queued owner prompts and minimal Slack-file metadata so
+a daemon restart can return them to the restored or committed leg.
 
 ## Research-preview dependencies
 

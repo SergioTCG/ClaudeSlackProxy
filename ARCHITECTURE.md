@@ -2,8 +2,9 @@
 
 *The original design was decided on 2026-07-21 after the
 [Claude feasibility study](docs/claude-feasibility.md) and empirical spike.
-Codex was added as a provider adapter on 2026-08-14. The implementation is
-modern JavaScript (ESM, Node 20+, no build step).*
+Codex was added as a provider adapter on 2026-08-14, and transactional
+cross-provider handoff on 2026-08-17. The implementation is modern JavaScript
+(ESM, Node 20+, no build step).*
 
 ## Components
 
@@ -14,7 +15,8 @@ Slack (private channels, Socket Mode)
 ┌────────────────────────── Mac Studio ──────────────────────────┐
 │  daemon/daemon.mjs  ← launchd, owns the ONE Socket Mode conn   │
 │    • HTTP 127.0.0.1:8877  (hooks, permissions, uploads, SSE)   │
-│    • state.json  (session ↔ provider ↔ channel ↔ pid ↔ tmux)   │
+│    • state.json  (channel lineage ↔ active/standby legs)       │
+│    • handoffs/   (private summaries + reviewed patches, 0600)  │
 │    • lifecycle, mirroring, status, resurrection, ./commands    │
 │         ▲ POST /hook              ▲ GET /channel/stream (SSE)  │
 │  hooks/hook.sh (global,           channel/server.mjs           │
@@ -78,6 +80,22 @@ Slack (private channels, Socket Mode)
    totaling 100 MiB may be sent in one call; realpath containment rejects
    traversal and symlink escapes. Slack failures and path corrections remain
    retryable until expiry. Grants intentionally do not survive daemon restarts.
+10. **One logical channel, separate native provider legs.** A lineage is created
+    lazily on the first `/cc-switch` or `/codex-switch`; legacy sessions are not
+    bulk migrated. `state.channels[channel]` remains the authoritative active
+    session mapping. Only the active leg carries `session.channel`; the other
+    provider's native session ID remains dormant and resumable.
+11. **Journaled two-phase provider handoff.** The source stays authoritative
+    while instruction alignment is reviewed and a private SAB v1 handoff is
+    captured. The bridge then stops it, starts or resumes the exact target leg
+    in a provisional tmux, and intercepts a read-only readiness turn. Only a
+    valid target response atomically moves the channel mapping. Crash recovery
+    and failures reap the exact provisional tmux and restore the source.
+12. **Instruction files, not provider memory.** Switch preflight inspects only
+    repository-root `AGENTS.md` and `CLAUDE.md`. Global Claude/Codex memory and
+    `MEMORY.md` never enter automatic consolidation. Reconciliation is a
+    private, constrained unified-diff proposal requiring owner review and
+    fingerprint, path, symlink, binary, mode, apply, and size validation.
 
 ## Command grammar (Slack)
 
@@ -90,6 +108,7 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 | `/cc-model`, `/cc-effort`, `/cc-flags`, `/cc-update` | Claude session | inspect/change Claude settings; restart/resume where required |
 | `/codex-model`, `/codex-effort`, `/codex-flags`, `/codex-update` | Codex session | inspect/change Codex settings; restart/resume where required |
 | `/cc-stop`, `/codex-stop` | matching session | interrupt the running turn (Claude Escape; Codex F12 binding) |
+| `/cc-switch [new]`, `/codex-switch [new]` | matching active, idle session | preview and transactionally hand the channel to the other provider; `new` explicitly replaces missing saved-leg state |
 | `/cc-status`, `/codex-status` | anywhere | session info here; provider-filtered table from control |
 | `/cc-kill`, `/codex-kill` | matching session or control | end a session in the selected provider namespace |
 | `/cc-health`, `/cc-cleanup`, `/cc-claim` | anywhere | bridge-wide operations, intentionally singular |
@@ -103,6 +122,14 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - `SessionStart(resume)` → reuse mapped channel, "▶️ resumed".
 - `SessionStart(clear)` → rebind channel to the new session id (same pid), "🧹 cleared".
 - `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".
+- Provider switch → preflight → optional reviewed instruction patch → private
+  source handoff → provisional target readiness → atomic channel commit. Owner
+  messages queue by channel in the private transition journal; collaborators
+  are rejected during the transition.
+- Switch failure/restart → kill the exact provisional target, restore the source
+  mapping, and deliver queued owner work to the restored source.
+- A standby leg's late or manual hooks are fenced: it cannot create a duplicate
+  channel or become live without the matching provider-switch transaction.
 - Topic synchronization reads Slack's current value after daemon boot and writes
   only on a real folder/branch/model/effort change.
 - You may rename channels freely — mapping is by immutable channel id.
@@ -117,3 +144,6 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
   best-effort.
 - Streaming response APIs are proven but not wired; long responses are uploaded
   as Markdown files.
+- Provider switching transfers an explicit summary and repository state, not
+  hidden reasoning or a byte-identical context window. Provider-global memory
+  remains native and intentionally unmerged.

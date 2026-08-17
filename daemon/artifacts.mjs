@@ -142,7 +142,18 @@ export function createArtifactGrantStore({
     else grant.inFlight = false
   }
 
-  return { issue, claim, finish, prune, size: () => grants.size }
+  function revoke(binding = {}) {
+    let removed = 0
+    for (const [key, grant] of grants) {
+      if (binding.sessionId && grant.sessionId !== binding.sessionId) continue
+      if (binding.channelId && grant.channelId !== binding.channelId) continue
+      if (binding.provider && grant.provider !== binding.provider) continue
+      grants.delete(key); removed++
+    }
+    return removed
+  }
+
+  return { issue, claim, finish, revoke, prune, size: () => grants.size }
 }
 
 export async function fulfillArtifactUpload(store, { token, binding, paths }, uploader) {

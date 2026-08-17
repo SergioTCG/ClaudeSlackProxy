@@ -4,6 +4,43 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.1] — 2026-08-17
+
+### Added
+- **Transactional provider handoff.** `/cc-switch` hands an active Claude Code
+  channel to Codex, and `/codex-switch` hands an active Codex channel to Claude
+  Code. Each Slack channel preserves separate native provider conversations and
+  keeps exactly one leg active.
+- **Private structured handoffs.** The source produces a bounded SAB v1 summary;
+  the target must complete a read-only readiness turn before the channel mapping
+  commits. Handoff files are integrity checked, mode `0600`, and retained for
+  two generations.
+- **Reviewed instruction alignment.** Repository-root `AGENTS.md` and
+  `CLAUDE.md` can be reconciled through a constrained unified-diff proposal.
+  Hash, path, binary, symlink, mode, apply, and 32 KiB budget checks run before
+  an owner-approved patch is left as uncommitted work.
+
+### Safety
+- Transition phases are synchronously journaled with atomic state writes. A
+  daemon restart or target failure reaps the exact provisional tmux and restores
+  the source mapping.
+- Owner messages queue at channel scope during a switch and receive target-bound
+  artifact grants only after commit. Collaborators cannot enqueue work during a
+  transition, and source-session upload grants are revoked on commit.
+- Stale and manually started standby hooks cannot create a second channel or
+  race the active provider. Cleanup removes every native leg in an archived
+  channel lineage.
+
+### Compatibility
+- Legacy sessions remain lazy, migration-free Claude records until their first
+  switch. Existing configuration paths, channels, launchers, state mappings,
+  HTTP port, and LaunchAgent identity remain unchanged.
+- Apply the canonical Slack manifest to the same app once to register
+  `/cc-switch` and `/codex-switch`; no new scopes, tokens, or second app are
+  required.
+
+[1.4.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.1
+
 ## [1.3.0] — 2026-08-15
 
 ### Released

@@ -1,7 +1,7 @@
 {
   "display_information": {
     "name": "Slack Agent Bridge",
-    "description": "Control local Claude Code and Codex sessions from Slack",
+    "description": "Control and hand off local Claude Code and Codex sessions from Slack",
     "background_color": "#1a1a2e"
   },
   "features": {
@@ -22,6 +22,7 @@
       { "command": "/cc-flags", "description": "Show or change Claude Code launch flags", "usage_hint": "[--dsp] [--chrome]", "should_escape": false },
       { "command": "/cc-update", "description": "Update Claude Code and restart/resume this session", "should_escape": false },
       { "command": "/cc-stop", "description": "Interrupt this Claude Code session's running turn", "should_escape": false },
+      { "command": "/cc-switch", "description": "Hand this channel from Claude Code to Codex", "usage_hint": "[new]", "should_escape": false },
       { "command": "/cc-kill", "description": "End a Claude Code session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
       { "command": "/cc-help", "description": "List Claude Code and bridge-wide commands", "should_escape": false },
 
@@ -33,6 +34,7 @@
       { "command": "/codex-flags", "description": "Show or change Codex launch flags", "usage_hint": "[--search] [--model=value]", "should_escape": false },
       { "command": "/codex-update", "description": "Update Codex and restart/resume this session", "should_escape": false },
       { "command": "/codex-stop", "description": "Interrupt this Codex session's running turn", "should_escape": false },
+      { "command": "/codex-switch", "description": "Hand this channel from Codex to Claude Code", "usage_hint": "[new]", "should_escape": false },
       { "command": "/codex-kill", "description": "End a Codex session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
       { "command": "/codex-help", "description": "List Codex commands", "should_escape": false }
     ]

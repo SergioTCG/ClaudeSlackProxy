@@ -1,7 +1,7 @@
 {
   "name": "slack-agent-bridge",
-  "version": "1.3.0",
-  "description": "Control local Claude Code and Codex CLI sessions from Slack with private channels and resumable terminals.",
+  "version": "1.4.0-rc.1",
+  "description": "Control and hand off local Claude Code and Codex CLI sessions from Slack with private channels and resumable terminals.",
   "private": true,
   "type": "module",
   "license": "MIT",

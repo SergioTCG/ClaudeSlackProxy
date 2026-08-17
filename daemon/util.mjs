@@ -46,13 +46,25 @@ export function loadState() {
   }
 }
 let saveTimer = null
+function writeState(state) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  const tmp = STATE_FILE + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 })
+  fs.renameSync(tmp, STATE_FILE)
+  try { fs.chmodSync(STATE_FILE, 0o600) } catch {}
+}
 export function saveState(state) {
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    const tmp = STATE_FILE + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2))
-    fs.renameSync(tmp, STATE_FILE)
-  }, 300)
+  saveTimer = setTimeout(() => { saveTimer = null; writeState(state) }, 300)
+}
+
+// Provider switches are a journaled cross-process transaction. Persist phase
+// boundaries synchronously so a daemon crash can never leave state claiming the
+// source is active after its terminal has already been stopped (or vice versa).
+export function saveStateNow(state) {
+  clearTimeout(saveTimer)
+  saveTimer = null
+  writeState(state)
 }
 
 // ---- processes --------------------------------------------------------------

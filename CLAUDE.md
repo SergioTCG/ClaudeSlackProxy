@@ -18,3 +18,6 @@ contract. This file adds only Claude-specific constraints.
 - Changes to Claude hooks, channel startup, consent detection, or transcript
   reading require the existing provider tests plus a local start/resume smoke
   test before release.
+- During provider switching, Claude handoff and target-readiness turns are
+  private bridge control turns. Do not stream their transcript prose, create a
+  second channel for a provisional/standby leg, or bypass the journaled commit.

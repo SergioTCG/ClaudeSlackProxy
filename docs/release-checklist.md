@@ -8,6 +8,8 @@
       guide describe the same provider and safety contracts.
 - [ ] `slack/app-manifest.json` is the sole Slack manifest.
 - [ ] `/cc-*` and `/codex-*` command namespaces match the documented release contract.
+- [ ] The existing Slack app has the two switch commands from the canonical
+      manifest; no second app, token set, or daemon exists.
 - [ ] `sab-cc`, `sab-codex`, and `sab-upload` work, and `ccs` / `ccs-codex` forward all args.
 - [ ] Legacy state, config, checkout, control-channel, and LaunchAgent identities
       are covered by tests.
@@ -48,6 +50,12 @@
 - [ ] Restarting with unchanged metadata does not write channel topics again.
 - [ ] Claude and Codex usage reports, plus live Codex time/token status, work.
 - [ ] File transfer, interrupt, model, effort, flags, and update commands work.
+- [ ] Claude → Codex and Codex → the original Claude leg preserve one channel,
+      provider-native IDs/settings, queued-message order, and topic metadata.
+- [ ] Target-start failure rolls back to the source; daemon restart during
+      target validation reaps the provisional tmux and restores one active leg.
+- [ ] Instruction alignment preview/apply and switch-without-alignment work;
+      stale hashes, traversal, symlink, binary, mode, and oversized proposals fail closed.
 - [ ] Owner and collaborator artifact returns work; expired/replayed grants and
       workspace/symlink escapes are rejected.
 - [ ] Permission relay is exercised once in a non-dangerous test session.

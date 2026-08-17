@@ -50,6 +50,10 @@ generated MCP configuration. Do not print secrets during diagnostics.
 - Every interactive provider process is wrapped in tmux inside a visible or
   dockless Ghostty window. tmux is the inbound transport and control surface.
 - Slack channels are private and mapped by channel ID, not mutable channel name.
+- A switched channel owns separate Claude and Codex native legs, with exactly
+  one active. Keep `state.channels[channel]` authoritative; only the active
+  session has `session.channel`. Create lineage state lazily, never by bulk
+  migration.
 - Claude inbound messages use its MCP Channel server; hooks mirror lifecycle and
   outbound content. Preserve the channel consent and account-switching paths.
 - Codex inbound messages use tmux; lifecycle hooks provide stable outbound final
@@ -64,6 +68,9 @@ generated MCP configuration. Do not print secrets during diagnostics.
   API error must not crash the long-running daemon.
 - State writes remain atomic. Replacement processes must not be overwritten or
   marked dormant by stale hooks from the process they superseded.
+- Provider-switch phase changes require immediate atomic persistence. Private
+  handoff/alignment turns must not mirror into Slack, and a target must not
+  receive the channel until its read-only readiness turn validates.
 
 Read `ARCHITECTURE.md` before altering session lifecycle, PID adoption, channel
 binding, terminal spawning, permission flow, or self-update behavior.
@@ -85,6 +92,12 @@ live process/tmux proof, and a one-use expiring grant. Resolve every file's real
 path and keep it inside the workspace captured by that grant; reject missing,
 non-regular, escaped, oversized, or replayed uploads. Agents never select a
 channel ID or arbitrary destination.
+
+Provider switching is owner-only. Queue owner prompts by channel during the
+transaction, reject collaborator prompts, revoke source artifact grants on
+commit, and mint new grants only when queued prompts enter the committed leg.
+Automatic instruction alignment may inspect only repository-root `AGENTS.md`
+and `CLAUDE.md`; never merge global/provider memory or `MEMORY.md`.
 
 ## Development workflow
 

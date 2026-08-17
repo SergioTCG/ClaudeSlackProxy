@@ -8,7 +8,7 @@ import {
   CODEX_DANGEROUS_FLAG, codexFlagsWithoutInitialPrompt, codexPermissionDecision,
   defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
-  parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
+  parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand, switchTargetLaunch,
 } from '../daemon/providers.mjs'
 
 test('legacy sessions remain Claude without a state migration', () => {
@@ -82,6 +82,19 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
   }), [
     'resume', CODEX_DANGEROUS_FLAG, 'thr-789', 'wake from Slack\nwith the full message',
   ])
+})
+
+test('provider switching resumes native settings or uses target defaults without translation', () => {
+  assert.deepEqual(switchTargetLaunch('codex', null, { CCS_CODEX_NEW_FLAGS: '--search --yolo' }), {
+    kind: 'new', args: ['--search', '--yolo'], effectiveFlags: ['--search', '--yolo'],
+  })
+  const claude = { id: 'cc-1', launchFlags: '--chrome --dangerously-skip-permissions', effort: 'high' }
+  assert.deepEqual(switchTargetLaunch('claude', claude, {}), {
+    kind: 'resume',
+    args: ['--chrome', '--dangerously-skip-permissions', '--effort', 'high', '--resume', 'cc-1'],
+    effectiveFlags: ['--chrome', '--dangerously-skip-permissions'],
+  })
+  assert.throws(() => switchTargetLaunch('codex', claude), /mismatch/)
 })
 
 test('Codex effort is recovered from launch overrides and root config only', () => {

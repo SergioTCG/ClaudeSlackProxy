@@ -116,6 +116,19 @@ test('failed uploads release the grant for a bounded retry', async () => {
   }
 })
 
+test('provider handoff revokes old session grants without affecting the target', () => {
+  const { temp, workspace } = fixture()
+  try {
+    let n = 0
+    const store = createArtifactGrantStore({ token: () => `grant-${++n}` })
+    const old = store.issue({ sessionId: 'old', channelId: 'C1', provider: 'claude', userId: 'U1', workspaceRoot: workspace })
+    const target = store.issue({ sessionId: 'new', channelId: 'C1', provider: 'codex', userId: 'U1', workspaceRoot: workspace })
+    assert.equal(store.revoke({ sessionId: 'old', channelId: 'C1' }), 1)
+    assert.throws(() => store.claim(old.token, { sessionId: 'old', channelId: 'C1', provider: 'claude' }), /invalid/)
+    assert.equal(store.claim(target.token, { sessionId: 'new', channelId: 'C1', provider: 'codex' }).sessionId, 'new')
+  } finally { fs.rmSync(temp, { recursive: true, force: true }) }
+})
+
 test('an in-flight grant cannot be used concurrently', async () => {
   const { temp, workspace } = fixture()
   try {

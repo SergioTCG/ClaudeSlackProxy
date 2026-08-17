@@ -9,7 +9,8 @@ the bridge opens a new Ghostty window and resumes the same conversation.
 The two providers deliberately have separate command namespaces: `/cc-*` is
 Claude Code and `/codex-*` is Codex. They share the reliable session, Slack,
 tmux, and Ghostty infrastructure without pretending that provider-specific
-capabilities are identical.
+capabilities are identical. A channel can safely hand work from one provider to
+the other while preserving a separate resumable native conversation for each.
 
 > [!WARNING]
 > **This is remote code execution by design.** Slack-spawned Claude sessions
@@ -38,6 +39,7 @@ capabilities are identical.
 | Default unattended mode | `--dangerously-skip-permissions` | `--yolo` |
 | Live working status with time and token counters | ✓ | ✓ |
 | Token and cost usage via `ccusage` | ✓ | ✓ |
+| Handoff to the other provider in the same Slack channel | ✓ | ✓ |
 | Claude subscription switching | ✓ | — |
 | Chrome integration flag | `--chrome` | No direct counterpart |
 | Live web search flag | Provider-managed | `--search` |
@@ -101,12 +103,12 @@ During a safe maintenance window, restart the bridge and launch `sab-codex`.
 In that first Codex session, run `/hooks` and explicitly trust the user hook,
 then exit and launch it again. Hook trust is hash-based and is never bypassed.
 
-Apps upgrading to 1.2 must apply the canonical
+Apps upgrading to 1.4 must apply the canonical
 [Slack app manifest](slack/app-manifest.json) to the **same app** once to
-register `/codex-usage`. Older apps also receive any other missing `/codex-*`
-commands. This does not change tokens or OAuth scopes and never requires a
-second Slack app. Applying it again only updates command registrations,
-metadata, and descriptions.
+register `/cc-switch` and `/codex-switch`. Older apps also receive any other
+missing commands such as `/codex-usage`. This does not change tokens or OAuth
+scopes and never requires a second Slack app. Applying it again only updates
+command registrations, metadata, and descriptions.
 
 ## Use
 
@@ -135,6 +137,7 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 | `/cc-update` / `/codex-update` | Update the selected CLI and resume the session |
 | `/cc-status` / `/codex-status` | Session details or a provider-filtered list |
 | `/cc-stop` / `/codex-stop` | Interrupt the current turn |
+| `/cc-switch [new]` / `/codex-switch [new]` | Hand this channel to the other provider; `new` explicitly replaces a missing saved leg |
 | `/cc-kill [id]` / `/codex-kill [id]` | End the process; keep its resumable channel |
 | `/cc-help` / `/codex-help` | Show commands for that provider |
 | `/cc-account [name]` | Bind a Claude session to a stored Claude subscription |
@@ -151,6 +154,36 @@ and `CCS_CODEX_RESUME_FLAGS`.
 Claude's `--chrome` has no Codex CLI equivalent. Codex `--search` controls live
 web search, not a Chrome browser; browser automation requires a separately
 configured MCP server or plugin.
+
+### Switch providers without changing channels
+
+Run `/cc-switch` in an active, idle Claude Code channel to hand it to Codex, or
+`/codex-switch` in an active, idle Codex channel to hand it to Claude Code. The
+command namespace always identifies the source provider. The bridge previews
+the target leg and its provider-native flags, then waits for owner confirmation.
+
+The source first produces a private, structured handoff. The bridge stores it
+under `~/.config/ccs/handoffs` with restrictive permissions, stops the source,
+starts or resumes the target's own native conversation, and runs a read-only
+readiness turn. The Slack channel changes hands only after that turn succeeds.
+Owner messages arriving during the transaction are queued and receive fresh
+artifact grants after commit; collaborators are blocked until it finishes. On
+failure or daemon restart, the provisional target is discarded and the source
+mapping is restored.
+
+Each channel may therefore have one active leg and one preserved standby leg.
+Models, effort, launch flags, and Claude subscription choice stay with their
+native provider and are never translated. A round trip resumes the original
+native conversation. If its saved state record is missing, the bridge refuses
+to replace it silently and offers the explicit `/cc-switch new` or
+`/codex-switch new` form.
+
+Before the first switch, the bridge inspects only repository-root `AGENTS.md`
+and `CLAUDE.md`; it never imports provider-global memory or `MEMORY.md`. When
+they need alignment, the owner can review a constrained unified diff before it
+is applied as ordinary uncommitted work. Applying is protected by file hashes,
+path and symlink validation, `git apply --check`, and Codex's 32 KiB project
+instruction budget. Switching without changing instructions remains available.
 
 ### Collaborators
 
@@ -192,7 +225,8 @@ The public name and canonical launchers changed without replacing the installed
 protocol:
 
 - `/cc-*` remains Claude and `/codex-*` remains Codex; 1.2 adds
-  `/codex-usage` without changing either namespace.
+  `/codex-usage`, while 1.4 adds the provider-scoped switch pair without
+  changing either namespace.
 - `sab-cc` and `sab-codex` are canonical; `sab-upload` is their shared,
   grant-bound artifact helper; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
@@ -210,11 +244,13 @@ For the new Codex usage command and its one-time manifest refresh, see the
 [1.2 migration guide](docs/migrating-to-1.2.md).
 Generated-file delivery requires no Slack app change; see the
 [1.3 migration guide](docs/migrating-to-1.3.md).
+Provider handoff requires the same-app command refresh described in the
+[1.4 migration guide](docs/migrating-to-1.4.md).
 
 ## Operations
 
 - **Logs:** `tail -f daemon.log`
-- **Config/state:** `~/.config/ccs/` (`env`, `state.json`, and accounts)
+- **Config/state:** `~/.config/ccs/` (`env`, `state.json`, accounts, and private handoffs)
 - **Restart:** `launchctl kickstart -k gui/$(id -u)/si.sergej.claudeslackproxy`
 - **Disable self-update:** set `CCS_AUTO_UPDATE=0` in `~/.config/ccs/env`
 - **Dockless Ghostty windows:** set `CCS_GHOSTTY_HIDDEN=1`

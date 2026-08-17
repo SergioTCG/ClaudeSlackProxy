@@ -150,6 +150,22 @@ export function resumeArgsFor(session, {
   return args
 }
 
+// Provider switches never translate flags, accounts, models, or effort across
+// providers. A returning native leg resumes with its own settings; a first-time
+// leg receives only that provider's configured new-session defaults.
+export function switchTargetLaunch(provider, targetSession = null, env = process.env) {
+  if (targetSession) {
+    if (providerOf(targetSession) !== provider) throw new Error('switch target provider mismatch')
+    const args = resumeArgsFor(targetSession, {
+      defaultClaudeFlags: env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions',
+      defaultCodexFlags: env.CCS_CODEX_RESUME_FLAGS || CODEX_DANGEROUS_FLAG,
+    })
+    return { kind: 'resume', args, effectiveFlags: displayFlagsFor(targetSession) }
+  }
+  const args = defaultNewFlagsFor(provider, env)
+  return { kind: 'new', args, effectiveFlags: [...args] }
+}
+
 export function codexPermissionDecision(behavior) {
   const decision = { behavior }
   if (behavior === 'deny') decision.message = 'Denied from Slack.'
