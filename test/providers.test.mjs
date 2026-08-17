@@ -8,7 +8,8 @@ import {
   CODEX_DANGEROUS_FLAG, codexFlagsWithoutInitialPrompt, codexPermissionDecision,
   defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
-  parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand, switchTargetLaunch,
+  parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
+  switchActionBlocks, switchTargetLaunch,
 } from '../daemon/providers.mjs'
 
 test('legacy sessions remain Claude without a state migration', () => {
@@ -95,6 +96,18 @@ test('provider switching resumes native settings or uses target defaults without
     effectiveFlags: ['--chrome', '--dangerously-skip-permissions'],
   })
   assert.throws(() => switchTargetLaunch('codex', claude), /mismatch/)
+})
+
+test('provider switch buttons have unique Slack action IDs', () => {
+  const transition = { id: 'tx-1', target: { provider: 'codex' } }
+  const preview = switchActionBlocks(transition, { safeToPropose: true })[0]
+  const proposal = switchActionBlocks(transition, { safeToPropose: true }, 'proposal')[0]
+
+  for (const block of [preview, proposal]) {
+    const ids = block.elements.map(element => element.action_id)
+    assert.equal(new Set(ids).size, ids.length)
+    assert.ok(ids.every(id => /^provider_switch_(align|apply|continue|cancel)$/.test(id)))
+  }
 })
 
 test('Codex effort is recovered from launch overrides and root config only', () => {

@@ -4,6 +4,19 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.2] — 2026-08-17
+
+### Fixed
+- Provider-switch confirmation buttons now use unique Slack Block Kit action
+  identifiers, preventing `invalid_blocks` from silently discarding the
+  preflight confirmation.
+- A failed switch-preview delivery immediately rolls back its persisted
+  preflight instead of blocking retries until the 30-minute expiry.
+- Slash-command failures now post a durable channel notice, with the command's
+  ephemeral response URL as a bounded fallback when channel posting fails.
+
+[1.4.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.2
+
 ## [1.4.0-rc.1] — 2026-08-17
 
 ### Added

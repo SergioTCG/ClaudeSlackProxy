@@ -166,6 +166,25 @@ export function switchTargetLaunch(provider, targetSession = null, env = process
   return { kind: 'new', args, effectiveFlags: [...args] }
 }
 
+// Slack requires action_id to be unique within an actions block. Keep the
+// action name in both the identifier and value: the identifier satisfies Block
+// Kit validation, while the signed interaction payload still carries the
+// transition id used to reject stale clicks.
+export function switchActionBlocks(transition, preflight, stage = 'preview') {
+  const actions = []
+  const button = (text, action, style) => ({
+    type: 'button', text: { type: 'plain_text', text }, action_id: `provider_switch_${action}`,
+    value: `switch:${transition.id}:${action}`, ...(style ? { style } : {}),
+  })
+  if (stage === 'proposal') actions.push(button('Apply and switch', 'apply', 'primary'), button('Switch without applying', 'continue'))
+  else {
+    if (preflight.safeToPropose) actions.push(button('Align instructions', 'align', 'primary'))
+    actions.push(button(`Switch to ${providerLabel(transition.target.provider)}`, 'continue', preflight.safeToPropose ? undefined : 'primary'))
+  }
+  actions.push(button('Cancel', 'cancel', 'danger'))
+  return [{ type: 'actions', block_id: `provider_switch_${transition.id}`, elements: actions }]
+}
+
 export function codexPermissionDecision(behavior) {
   const decision = { behavior }
   if (behavior === 'deny') decision.message = 'Denied from Slack.'

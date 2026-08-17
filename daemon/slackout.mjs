@@ -23,6 +23,29 @@ export function enqueue(channel, fn) {
   return next
 }
 
+// Slash commands are acknowledged before their work runs, so a later failure
+// would otherwise look like silence. Prefer a durable channel message; if the
+// bot cannot post there, use the command's response_url as an ephemeral final
+// fallback. Never let failure reporting crash the Socket Mode daemon.
+export async function reportSlashFailure(body, { postChannel, postEphemeral }) {
+  const rawCommand = String(body?.command || '')
+  const command = /^\/[a-z0-9_-]{1,64}$/.test(rawCommand) ? rawCommand : '/bridge-command'
+  const status = command.startsWith('/codex-') ? '/codex-status' : '/cc-status'
+  const text = `❌ \`${command}\` failed inside the bridge. Check \`${status}\` before retrying.`
+  if (body?.channel_id) {
+    try {
+      await postChannel(body.channel_id, text)
+      return 'channel'
+    } catch {}
+  }
+  try {
+    const result = await postEphemeral(body, text)
+    return result === false ? 'none' : 'ephemeral'
+  } catch {
+    return 'none'
+  }
+}
+
 export const escapeText = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 export function unescapeSlack(s) {

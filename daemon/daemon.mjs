@@ -13,13 +13,13 @@ import {
   ghosttySpawn, clearKillOnClose, execFile, availableModels, reapGhosttyZombies, tmuxTitle, safeAccount,
   requestBridgeWindow,
 } from './util.mjs'
-import { enqueue, mdToMessages, unescapeSlack, escapeText } from './slackout.mjs'
+import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, acceptHookSettings, allowedFlags,
   codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
-  switchTargetLaunch,
+  switchActionBlocks, switchTargetLaunch,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createTopicSync } from './topic.mjs'
@@ -1248,21 +1248,6 @@ function instructionSummary(preflight) {
   return '📝 `AGENTS.md` and `CLAUDE.md` diverge; the bridge can propose a reviewed reconciliation.'
 }
 
-function switchActionBlocks(transition, preflight, stage = 'preview') {
-  const actions = []
-  const button = (text, action, style) => ({
-    type: 'button', text: { type: 'plain_text', text }, action_id: 'provider_switch',
-    value: `switch:${transition.id}:${action}`, ...(style ? { style } : {}),
-  })
-  if (stage === 'proposal') actions.push(button('Apply and switch', 'apply', 'primary'), button('Switch without applying', 'continue'))
-  else {
-    if (preflight.safeToPropose) actions.push(button('Align instructions', 'align', 'primary'))
-    actions.push(button(`Switch to ${providerLabel(transition.target.provider)}`, 'continue', preflight.safeToPropose ? undefined : 'primary'))
-  }
-  actions.push(button('Cancel', 'cancel', 'danger'))
-  return [{ type: 'actions', block_id: `provider_switch_${transition.id}`, elements: actions }]
-}
-
 function scheduleSwitchPreviewExpiry(channel, transitionId, expectedUpdatedAt) {
   setTimeout(async () => {
     const lineage = lineageFor(state, channel)
@@ -1312,10 +1297,18 @@ async function beginProviderSwitch(channel, source, { replaceMissing = false } =
     `Target: ${settings}\nLaunch flags: \`${flags}\`\n${instructionSummary(preflight)}\n` +
     '_The current provider remains active until a private handoff is safely captured._'
   scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
-  return enqueue(channel, () => web.chat.postMessage({
-    channel, text,
-    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }, ...switchActionBlocks(transition, preflight)],
-  }))
+  try {
+    return await enqueue(channel, () => web.chat.postMessage({
+      channel, text,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }, ...switchActionBlocks(transition, preflight)],
+    }))
+  } catch (error) {
+    if (activeTransition(channel)?.id === transition.id) {
+      rollbackTransition(state, channel, 'provider switch preview delivery failed')
+      saveStateNow(state)
+    }
+    throw error
+  }
 }
 
 function transitionPreflight(transition) {
@@ -2564,13 +2557,14 @@ function persistOwner(uid) {
 }
 // Reply visibly to a slash command in channels the bot may not be a member of.
 async function respondEphemeral(body, text) {
-  if (!body?.response_url) return
+  if (!body?.response_url) return false
   try {
-    await fetch(body.response_url, {
+    const response = await fetch(body.response_url, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, response_type: 'ephemeral' }),
     })
-  } catch {}
+    return response.ok
+  } catch { return false }
 }
 
 sm.on('slash_commands', async ({ body, ack }) => {
@@ -2599,7 +2593,11 @@ sm.on('slash_commands', async ({ body, ack }) => {
     const rest = String(body.text || '').trim().split(/\s+/).filter(Boolean)
     log('slash', body.command, JSON.stringify(body.text || ''))
     await dispatch(name, rest, body.channel_id, provider)
-  } catch (e) { log('slash error', String(e)) }
+  } catch (e) {
+    log('slash error', String(e))
+    const delivered = await reportSlashFailure(body, { postChannel: post, postEphemeral: respondEphemeral })
+    if (delivered === 'none') log('slash feedback failed', body?.command || 'unknown command')
+  }
 })
 
 // Interactive components: Approve/Deny buttons and provider folder pickers.
@@ -2639,7 +2637,7 @@ sm.on('interactive', async ({ body, ack }) => {
       }
       return
     }
-    if (action.action_id === 'provider_switch') {
+    if (String(action.action_id || '').startsWith('provider_switch_')) {
       const [kind, transitionId, actionName] = String(action.value || '').split(':')
       if (kind === 'switch' && transitionId && actionName) {
         await handleProviderSwitchAction(body.channel?.id, transitionId, actionName)
