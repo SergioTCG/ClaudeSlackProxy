@@ -129,6 +129,14 @@ Press enter to continue`
   assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
 })
 
+test('Codex target readiness ignores blank rows below the UI in a tall terminal', () => {
+  const ready = `OpenAI Codex (v0.147.0)
+› Find and fix a bug in @filename
+gpt-5.6-sol xhigh · ~/Code/Barrique${'\n'.repeat(40)}`
+
+  assert.equal(targetStartupState('codex', ready), 'ready')
+})
+
 test('target validation requires a provider hook session claim', async () => {
   const transition = { target: { provider: 'codex', sid: null } }
   let waits = 0

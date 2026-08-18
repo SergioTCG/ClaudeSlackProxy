@@ -194,7 +194,9 @@ const stripTerminalControls = value => String(value || '')
 // live Codex UI in scrollback, while the model/effort/path footer proves that
 // the normal input surface has materialized.
 export function targetStartupState(provider, pane) {
-  const lines = stripTerminalControls(pane).split('\n').slice(-16)
+  const rendered = stripTerminalControls(pane).split('\n')
+  while (rendered.length && !rendered.at(-1).trim()) rendered.pop()
+  const lines = rendered.slice(-16)
   const visible = lines.join('\n')
   if (provider === 'codex') {
     const prompt = lines.some(line => /^\s*[›❯>]\s/.test(line))

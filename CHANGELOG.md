@@ -4,6 +4,15 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.5] — 2026-08-18
+
+### Fixed
+- Codex target readiness now ignores trailing blank terminal rows. Tall Ghostty
+  windows can render the complete idle UI near the top with empty space below;
+  that ready state no longer waits until the transactional startup timeout.
+
+[1.4.0-rc.5]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.5
+
 ## [1.4.0-rc.4] — 2026-08-18
 
 ### Fixed
