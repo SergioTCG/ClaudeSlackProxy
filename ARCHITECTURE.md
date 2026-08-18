@@ -123,6 +123,8 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 ## Lifecycle (channel naming: `{repo}-{branch}-{yyyymmdd}-{hhmm}`)
 
 - `SessionStart(startup)` → create private channel, invite you, post header, set topic.
+- Concurrent startup hooks share one single-flight channel binding; boot removes
+  stale aliases that disagree with the session's authoritative channel ID.
 - `SessionStart(resume)` → reuse mapped channel, "▶️ resumed".
 - `SessionStart(clear)` → rebind channel to the new session id (same pid), "🧹 cleared".
 - `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".

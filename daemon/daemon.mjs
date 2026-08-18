@@ -22,6 +22,7 @@ import {
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
+import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-binding.mjs'
 import { createTopicSync } from './topic.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
@@ -62,7 +63,10 @@ const BOOT_TS = Date.now()
 // A Codex permission request is a held HTTP response and cannot survive a daemon
 // restart. Claude requests use MCP and remain recoverable only if their PID is
 // still alive. Prune dead entries so status/pollers never wait on stale prompts.
-if (prunePermissionsOnBoot(state.perms, pidAlive)) saveState(state)
+const prunedPermissions = prunePermissionsOnBoot(state.perms, pidAlive)
+const prunedChannelAliases = pruneSessionChannelAliases(state)
+if (prunedPermissions || prunedChannelAliases) saveState(state)
+if (prunedChannelAliases) log('pruned stale session channel aliases', prunedChannelAliases)
 
 // Safety net: a single Slack API error (e.g. posting to an archived channel from
 // a timer) must never crash the long-running daemon.
@@ -215,8 +219,8 @@ function withArtifactDelivery(session, text, request) {
   }
 }
 
-async function ensureChannel(session) {
-  if (session.channel) return session.channel
+const ensureSessionChannel = createSessionChannelGate()
+async function createSessionChannel(session) {
   // A binding can be lost (state edited out from under the daemon, a botched
   // migration, a manual repair). Before minting a duplicate channel for a
   // terminal that already has one, reclaim it — a terminal maps to one channel.
@@ -255,6 +259,7 @@ async function ensureChannel(session) {
     (provider === 'codex' ? ` · Provider: *${providerLabel(provider)}*` : ''))
   return ch
 }
+const ensureChannel = session => ensureSessionChannel(session, () => createSessionChannel(session))
 
 // Reactive channel topic: folder · branch · model · effort. The synchronizer
 // hydrates Slack's existing value after daemon boot, so an unchanged restart

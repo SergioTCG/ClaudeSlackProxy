@@ -4,6 +4,18 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.6] — 2026-08-18
+
+### Fixed
+- Concurrent startup lifecycle hooks now share one single-flight Slack channel
+  binding per native session, preventing duplicate private channels and split
+  inbound/outbound routing.
+- Daemon boot removes stale channel aliases that contradict a session's
+  authoritative channel ID, repairing duplicate mappings without renaming or
+  archiving Slack channels.
+
+[1.4.0-rc.6]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.6
+
 ## [1.4.0-rc.5] — 2026-08-18
 
 ### Fixed
