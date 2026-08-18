@@ -3,15 +3,18 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import {
-  CODEX_INSTRUCTION_LIMIT, deterministicWrapperPatch, fingerprintsMatch, inspectInstructions,
-  instructionProposalPrompt, readInstructionProposal, validateInstructionPatch, writeInstructionProposal,
-  validateInstructionResult,
+  buildInstructionDocuments, buildInstructionPatch, CODEX_INSTRUCTION_LIMIT,
+  deterministicWrapperPatch, fingerprintsMatch, inspectInstructions,
+  instructionDocumentsPrompt, instructionProgressText, instructionProposalTimeout, parseInstructionDocuments,
+  readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionDocuments,
+  validateInstructionPatch, writeInstructionProposal, validateInstructionResult,
 } from '../daemon/instructions.mjs'
 
 function repo() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-instructions-'))
-  fs.mkdirSync(path.join(root, '.git'))
+  execFileSync('git', ['init', '--quiet', root])
   return root
 }
 
@@ -42,10 +45,78 @@ test('preflight never imports global memory and offers to compact oversized AGEN
     const small = repo()
     try {
       fs.writeFileSync(path.join(small, 'CLAUDE.md'), '# local\n')
-      const prompt = instructionProposalPrompt(inspectInstructions(small))
+      const prompt = instructionDocumentsPrompt(inspectInstructions(small))
       assert.match(prompt, /Never import global\/user memory or MEMORY\.md/)
+      assert.doesNotMatch(prompt, /unified Git patch/i)
+      assert.match(prompt, /<SAB_AGENTS_MD>/)
+      assert.match(prompt, /<SAB_CLAUDE_SPECIFIC>/)
     } finally { fs.rmSync(small, { recursive: true, force: true }) }
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('document protocol builds a compact canonical guide and deterministic Claude wrapper', () => {
+  const parsed = parseInstructionDocuments(`<SAB_AGENTS_MD>
+# Canonical guide
+
+Keep the tests green.
+</SAB_AGENTS_MD>
+<SAB_CLAUDE_SPECIFIC>
+Use Claude-specific browser tooling only when explicitly requested.
+</SAB_CLAUDE_SPECIFIC>`)
+  const documents = buildInstructionDocuments(parsed)
+  validateInstructionDocuments(documents)
+
+  assert.match(documents.agents, /^# Canonical guide/)
+  assert.match(documents.claude, /Read and follow \[AGENTS\.md\]/)
+  assert.match(documents.claude, /Claude-specific instructions/)
+  assert.ok(Buffer.byteLength(documents.agents) <= CODEX_INSTRUCTION_LIMIT)
+})
+
+test('document protocol rejects malformed, oversized, and duplicative output', () => {
+  assert.throws(() => parseInstructionDocuments('not structured'), /document envelope/)
+  assert.throws(() => buildInstructionDocuments({
+    agents: 'x'.repeat(CODEX_INSTRUCTION_LIMIT + 1), claudeSpecific: '',
+  }), /AGENTS\.md exceeds/)
+  assert.throws(() => buildInstructionDocuments({
+    agents: '# Guide', claudeSpecific: 'Read AGENTS.md and repeat the shared guide.',
+  }), /must not repeat or reference AGENTS\.md/)
+})
+
+test('bridge generates and applies the Git patch instead of asking the model for diff syntax', async () => {
+  const root = repo()
+  try {
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Legacy Claude guide\n')
+    const preflight = inspectInstructions(root)
+    const documents = buildInstructionDocuments({
+      agents: '# Canonical guide\n\nRun the full test suite.', claudeSpecific: '',
+    })
+    const patch = await buildInstructionPatch(preflight, documents)
+    const checked = validateInstructionPatch(patch, preflight)
+
+    assert.deepEqual(checked.touched, ['AGENTS.md', 'CLAUDE.md'])
+    assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false)
+    execFileSync('git', ['-C', root, 'apply', '--whitespace=nowarn', '-'], { input: checked.patch })
+    assert.equal(validateInstructionResult(root).kind, 'aligned')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('instruction subprocess timeout is configurable but bounded', () => {
+  assert.equal(instructionProposalTimeout({}), 10 * 60 * 1000)
+  assert.equal(instructionProposalTimeout({ CCS_INSTRUCTION_TIMEOUT_SECONDS: '30' }), 60 * 1000)
+  assert.equal(instructionProposalTimeout({ CCS_INSTRUCTION_TIMEOUT_SECONDS: '99999' }), 30 * 60 * 1000)
+  assert.equal(instructionProposalTimeout({ CCS_INSTRUCTION_TIMEOUT_SECONDS: 'invalid' }), 10 * 60 * 1000)
+  assert.match(instructionProgressText(125000), /2 min.*source remains active.*no files have changed/i)
+})
+
+test('auxiliary model environment excludes bridge and Slack credentials', () => {
+  const env = sanitizedAuxiliaryEnv({
+    HOME: '/tmp/home', PATH: '/bin', ANTHROPIC_API_KEY: 'keep-for-provider',
+    SLACK_BOT_TOKEN: 'remove', SLACK_APP_TOKEN: 'remove', CCS_TMUX: 'remove',
+    CODEX_THREAD_ID: 'remove', CODEX_TURN_ID: 'remove', CODEX_SESSION_ID: 'remove',
+  })
+  assert.deepEqual(env, {
+    HOME: '/tmp/home', PATH: '/bin', ANTHROPIC_API_KEY: 'keep-for-provider',
+  })
 })
 
 test('safe wrapper proposal only creates a thin CLAUDE.md reference', () => {

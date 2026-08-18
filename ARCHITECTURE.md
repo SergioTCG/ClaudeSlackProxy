@@ -93,9 +93,11 @@ Slack (private channels, Socket Mode)
     and failures reap the exact provisional tmux and restore the source.
 12. **Instruction files, not provider memory.** Switch preflight inspects only
     repository-root `AGENTS.md` and `CLAUDE.md`. Global Claude/Codex memory and
-    `MEMORY.md` never enter automatic consolidation. Reconciliation is a
-    private, constrained unified-diff proposal requiring owner review and
-    fingerprint, path, symlink, binary, mode, apply, and size validation.
+    `MEMORY.md` never enter automatic consolidation. A credential-scrubbed
+    auxiliary process runs from a private neutral directory and returns bounded
+    document sections; the bridge constructs the Git patch deterministically.
+    Owner review plus fingerprint, path, symlink, binary, mode, apply, and size
+    validation remain mandatory.
 
 ## Command grammar (Slack)
 

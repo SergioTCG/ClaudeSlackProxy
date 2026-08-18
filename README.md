@@ -180,10 +180,15 @@ to replace it silently and offers the explicit `/cc-switch new` or
 
 Before the first switch, the bridge inspects only repository-root `AGENTS.md`
 and `CLAUDE.md`; it never imports provider-global memory or `MEMORY.md`. When
-they need alignment, the owner can review a constrained unified diff before it
-is applied as ordinary uncommitted work. Applying is protected by file hashes,
-path and symlink validation, `git apply --check`, and Codex's 32 KiB project
-instruction budget. Switching without changing instructions remains available.
+they need alignment, an auxiliary provider returns bounded document sections
+from a private neutral directory; the bridge constructs the constrained Git
+patch itself. The owner reviews the complete proposal before it is applied as
+ordinary uncommitted work. Applying is protected by file hashes, path and
+symlink validation, `git apply --check`, and Codex's 32 KiB project instruction
+budget. Progress is reported every minute. Generation defaults to a bounded
+ten-minute ceiling; set `CCS_INSTRUCTION_TIMEOUT_SECONDS` in
+`~/.config/ccs/env` to choose a value from 60 through 1800 seconds. Switching
+without changing instructions remains available.
 
 ### Collaborators
 

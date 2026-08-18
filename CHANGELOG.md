@@ -4,6 +4,24 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.3] — 2026-08-18
+
+### Fixed
+- Large instruction consolidations now ask the auxiliary provider for bounded
+  document sections instead of a full unified diff. The bridge constructs and
+  validates the Git patch deterministically, avoiding duplicated source text
+  and long model-authored deletion hunks.
+- Reconciliation runs in a private neutral directory so the repository's
+  `CLAUDE.md` is not loaded a second time. Slack and bridge credentials are
+  removed from the auxiliary process environment.
+- The proposal ceiling defaults to ten minutes and can be bounded through
+  `CCS_INSTRUCTION_TIMEOUT_SECONDS`; Slack receives a progress notice every
+  minute and a visible safe failure if generation still cannot complete.
+- Long proposals now attach the complete patch for owner review instead of
+  labelling a truncated preview as the full proposal.
+
+[1.4.0-rc.3]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.3
+
 ## [1.4.0-rc.2] — 2026-08-17
 
 ### Fixed

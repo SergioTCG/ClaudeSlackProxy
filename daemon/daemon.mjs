@@ -40,8 +40,11 @@ import {
   deleteHandoffs, handoffPrompt, readHandoff, targetBootstrapPrompt, validateBootstrapReply, writeHandoff,
 } from './handoffs.mjs'
 import {
-  deterministicWrapperPatch, fingerprintsMatch, inspectInstructions, instructionProposalPrompt,
-  readInstructionProposal, validateInstructionPatch, validateInstructionResult, writeInstructionProposal,
+  buildInstructionDocuments, buildInstructionPatch, deterministicWrapperPatch, fingerprintsMatch,
+  inspectInstructions, instructionDocumentsPrompt, instructionProgressText, instructionProposalTimeout,
+  parseInstructionDocuments,
+  readInstructionProposal, sanitizedAuxiliaryEnv, validateInstructionPatch, validateInstructionResult,
+  writeInstructionProposal,
 } from './instructions.mjs'
 
 loadEnv()
@@ -1154,10 +1157,7 @@ async function captureTargetValidation(transition, prompt) {
 }
 
 function auxiliaryEnv() {
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) if (/^CCS_/.test(key)) delete env[key]
-  for (const key of ['CODEX_THREAD_ID', 'CODEX_TURN_ID', 'CODEX_SESSION_ID']) delete env[key]
-  return env
+  return sanitizedAuxiliaryEnv(process.env)
 }
 
 function runWithInput(bin, args, { cwd, input, timeout = 180000, maxBuffer = 2 << 20 }) {
@@ -1182,32 +1182,35 @@ function runWithInput(bin, args, { cwd, input, timeout = 180000, maxBuffer = 2 <
     child.on('close', code => code === 0
       ? finish(null, stdout.trim())
       : finish(new Error((stderr || stdout || `agent exited ${code}`).trim().slice(0, 1000))))
-    timer = setTimeout(() => { child.kill(); finish(new Error('instruction proposal agent timed out')) }, timeout)
+    timer = setTimeout(() => {
+      child.kill()
+      finish(new Error(`instruction proposal agent timed out after ${Math.round(timeout / 1000)} seconds`))
+    }, timeout)
     child.stdin.end(input)
   })
 }
 
-function extractUnifiedPatch(output) {
-  const text = String(output || '').trim()
-  const fenced = [...text.matchAll(/```(?:diff|patch)?\s*\n([\s\S]*?)```/gi)]
-    .map(match => match[1]).find(value => /^(?:diff --git |--- (?:a\/|\/dev\/null))/m.test(value))
-  const candidate = (fenced || text).trim()
-  const at = candidate.search(/^(?:diff --git |--- (?:a\/|\/dev\/null))/m)
-  return at >= 0 ? candidate.slice(at).trim() + '\n' : candidate + '\n'
-}
-
 async function generateInstructionProposal(preflight, provider) {
   if (preflight.kind === 'agents_only' && !preflight.oversize) return deterministicWrapperPatch(preflight)
-  const prompt = instructionProposalPrompt(preflight)
-  const output = provider === 'codex'
-    ? await runWithInput(codexBin(), ['exec', '--sandbox', 'read-only', '--ephemeral', '--color', 'never', '--skip-git-repo-check', '-'], {
-      cwd: preflight.root, input: prompt,
-    })
-    : await runWithInput(claudeBin(), [
-      '--print', '--permission-mode', 'plan', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit',
-      '--no-session-persistence',
-    ], { cwd: preflight.root, input: prompt })
-  return extractUnifiedPatch(output)
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  const neutralCwd = fs.mkdtempSync(path.join(CONFIG_DIR, 'instruction-agent-'))
+  try {
+    fs.chmodSync(neutralCwd, 0o700)
+    const prompt = instructionDocumentsPrompt(preflight)
+    const timeout = instructionProposalTimeout(process.env)
+    const output = provider === 'codex'
+      ? await runWithInput(codexBin(), ['exec', '--sandbox', 'read-only', '--ephemeral', '--color', 'never', '--skip-git-repo-check', '-'], {
+        cwd: neutralCwd, input: prompt, timeout,
+      })
+      : await runWithInput(claudeBin(), [
+        '--print', '--permission-mode', 'plan', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit',
+        '--no-session-persistence',
+      ], { cwd: neutralCwd, input: prompt, timeout })
+    const documents = buildInstructionDocuments(parseInstructionDocuments(output))
+    return await buildInstructionPatch(preflight, documents, { tempRoot: CONFIG_DIR })
+  } finally {
+    fs.rmSync(neutralCwd, { recursive: true, force: true })
+  }
 }
 
 async function validateInstructionPatchResult(preflight, patch) {
@@ -1324,7 +1327,19 @@ async function proposeInstructionAlignment(channel, lineage, transition) {
   if (!preflight.safeToPropose || !fingerprintsMatch({ root: preflight.root, fingerprints: transition.instructions.fingerprints })) {
     throw new Error(preflight.reason || 'instruction files changed since the switch preview')
   }
-  const patch = await generateInstructionProposal(preflight, transition.source.provider)
+  const progressStartedAt = Date.now()
+  const progress = setInterval(() => {
+    const current = activeTransition(channel)
+    if (!current || current.id !== transition.id || current.phase !== 'aligning') return
+    post(channel, instructionProgressText(Date.now() - progressStartedAt)).catch(() => {})
+  }, 60000)
+  progress.unref?.()
+  let patch
+  try {
+    patch = await generateInstructionProposal(preflight, transition.source.provider)
+  } finally {
+    clearInterval(progress)
+  }
   const checked = validateInstructionPatch(patch, preflight)
   await validateInstructionPatchResult(preflight, checked.patch)
   transition.instructions.proposal = writeInstructionProposal(CONFIG_DIR, channel, transition.id, checked.patch)
@@ -1333,7 +1348,7 @@ async function proposeInstructionAlignment(channel, lineage, transition) {
   setTransitionPhase(lineage, 'preflight')
   saveStateNow(state)
   scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
-  const shown = checked.patch.length > 12000 ? checked.patch.slice(0, 12000) + '\n… (proposal truncated in preview)' : checked.patch
+  const shown = checked.patch.length > 2600 ? checked.patch.slice(0, 2600) + '\n… (full proposal attached below)' : checked.patch
   const text = `📝 *Instruction reconciliation proposal*\n\`\`\`diff\n${shown}\`\`\`\n_Apply leaves these changes uncommitted for normal review._`
   await enqueue(channel, () => web.chat.postMessage({
     channel, text: 'Instruction reconciliation proposal ready.',
@@ -1342,7 +1357,7 @@ async function proposeInstructionAlignment(channel, lineage, transition) {
       ...switchActionBlocks(transition, preflight, 'proposal'),
     ],
   }))
-  if (shown.length > 2800) await postMd(channel, `*Full instruction proposal*\n\n\`\`\`diff\n${shown}\`\`\``)
+  if (checked.patch.length > 2600) await postMd(channel, `*Full instruction proposal*\n\n\`\`\`diff\n${checked.patch}\`\`\``)
 }
 
 async function applyInstructionProposal(transition) {

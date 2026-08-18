@@ -1,11 +1,19 @@
 import crypto from 'node:crypto'
+import { execFile as _execFile } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
+
+const execFile = promisify(_execFile)
 
 export const CODEX_INSTRUCTION_LIMIT = 32 * 1024
 export const MAX_INSTRUCTION_PATCH_BYTES = 96 * 1024
 export const CLAUDE_THIN_LIMIT = 8 * 1024
 export const MAX_INSTRUCTION_SOURCE_BYTES = 512 * 1024
+export const DEFAULT_INSTRUCTION_TIMEOUT_MS = 10 * 60 * 1000
+export const MIN_INSTRUCTION_TIMEOUT_MS = 60 * 1000
+export const MAX_INSTRUCTION_TIMEOUT_MS = 30 * 60 * 1000
 export const CLAUDE_WRAPPER = `# Claude Code instructions
 
 Read and follow [AGENTS.md](./AGENTS.md) as the canonical repository guide.
@@ -79,18 +87,26 @@ export function fingerprintsMatch(preflight) {
   })
 }
 
-export function instructionProposalPrompt(preflight) {
+export function instructionDocumentsPrompt(preflight) {
   if (!preflight?.safeToPropose) throw new Error(preflight?.reason || `instruction state ${preflight?.kind} does not need a proposal`)
   const agents = preflight.agents.content ?? '(missing)'
   const claude = preflight.claude.content ?? '(missing)'
-  return `Reconcile the repository's root agent instructions. Output one unified Git patch only; do not edit files or run commands.
+  return `Reconcile the repository's root agent instructions. Do not edit files, run commands, or output a Git patch.
 
 Contract:
 - AGENTS.md becomes the concise canonical guide shared by humans, Codex, and Claude Code.
-- CLAUDE.md becomes a thin wrapper that explicitly tells Claude to read AGENTS.md, plus only genuinely Claude-specific additions.
+- Return the complete AGENTS.md plus only genuinely Claude-specific additions; the bridge constructs the thin CLAUDE.md wrapper and Git patch deterministically.
 - Preserve substantive constraints. Remove duplication and contradictions. Never import global/user memory or MEMORY.md.
-- Touch only root AGENTS.md and root CLAUDE.md. No rename, binary data, symlink, executable bit, or other mode change.
 - Keep AGENTS.md below ${CODEX_INSTRUCTION_LIMIT} bytes.
+- Do not repeat shared AGENTS.md guidance in the Claude-specific section. Use (none) when no provider-specific additions are needed.
+
+Output exactly this envelope, with no code fences or commentary:
+<SAB_AGENTS_MD>
+complete canonical AGENTS.md
+</SAB_AGENTS_MD>
+<SAB_CLAUDE_SPECIFIC>
+Claude-only additions, or (none)
+</SAB_CLAUDE_SPECIFIC>
 
 Current AGENTS.md:
 ---
@@ -101,6 +117,92 @@ Current CLAUDE.md:
 ---
 ${claude}
 ---`
+}
+
+// Backward-compatible internal name for callers outside the daemon. The
+// protocol now returns documents, never model-authored diff syntax.
+export const instructionProposalPrompt = instructionDocumentsPrompt
+
+const normalizeDocument = value => String(value || '').replace(/\r\n?/g, '\n').trim() + '\n'
+
+export function parseInstructionDocuments(output) {
+  const text = String(output || '').trim()
+  const match = /^<SAB_AGENTS_MD>\s*\n([\s\S]*?)\n<\/SAB_AGENTS_MD>\s*\n<SAB_CLAUDE_SPECIFIC>\s*\n([\s\S]*?)\n<\/SAB_CLAUDE_SPECIFIC>$/.exec(text)
+  if (!match) throw new Error('instruction response does not match the required document envelope')
+  const claudeSpecific = /^\s*\(none\)\s*$/i.test(match[2]) ? '' : match[2]
+  return { agents: normalizeDocument(match[1]), claudeSpecific: claudeSpecific ? normalizeDocument(claudeSpecific) : '' }
+}
+
+export function validateInstructionDocuments(documents) {
+  const agents = String(documents?.agents || '')
+  const claude = String(documents?.claude || '')
+  if (!agents.trim()) throw new Error('generated AGENTS.md is empty')
+  if (Buffer.byteLength(agents) > CODEX_INSTRUCTION_LIMIT) {
+    throw new Error(`generated AGENTS.md exceeds ${CODEX_INSTRUCTION_LIMIT} bytes`)
+  }
+  if (!claude.startsWith(CLAUDE_WRAPPER.trimEnd())) throw new Error('generated CLAUDE.md is not the required deterministic wrapper')
+  if (!/\bAGENTS\.md\b/i.test(claude)) throw new Error('generated CLAUDE.md must reference AGENTS.md')
+  if (Buffer.byteLength(claude) > CLAUDE_THIN_LIMIT) throw new Error(`generated CLAUDE.md exceeds ${CLAUDE_THIN_LIMIT} bytes`)
+  if (/\0|<\/?SAB_(?:AGENTS_MD|CLAUDE_SPECIFIC)>/.test(agents + claude)) {
+    throw new Error('generated instruction documents contain forbidden control markers')
+  }
+  return documents
+}
+
+export function buildInstructionDocuments({ agents, claudeSpecific = '' } = {}) {
+  const canonical = normalizeDocument(agents)
+  const specific = String(claudeSpecific || '').replace(/\r\n?/g, '\n').trim()
+  if (/\bAGENTS\.md\b/i.test(specific)) throw new Error('Claude-specific additions must not repeat or reference AGENTS.md')
+  const suffix = specific ? `\n\n## Claude-specific instructions\n\n${specific}` : ''
+  const documents = {
+    agents: canonical,
+    claude: normalizeDocument(CLAUDE_WRAPPER.trimEnd() + suffix),
+  }
+  return validateInstructionDocuments(documents)
+}
+
+export function instructionProposalTimeout(env = process.env) {
+  const seconds = Number(env.CCS_INSTRUCTION_TIMEOUT_SECONDS)
+  if (!Number.isFinite(seconds) || seconds <= 0) return DEFAULT_INSTRUCTION_TIMEOUT_MS
+  return Math.min(MAX_INSTRUCTION_TIMEOUT_MS, Math.max(MIN_INSTRUCTION_TIMEOUT_MS, Math.round(seconds * 1000)))
+}
+
+export function instructionProgressText(elapsedMs) {
+  const minutes = Math.max(1, Math.floor(Number(elapsedMs || 0) / 60000))
+  return `⏳ Read-only instruction consolidation is still running (${minutes} min). The source remains active; no files have changed.`
+}
+
+export function sanitizedAuxiliaryEnv(input = process.env) {
+  const env = { ...input }
+  for (const key of Object.keys(env)) if (/^(?:CCS_|SLACK_)/.test(key)) delete env[key]
+  for (const key of ['CODEX_THREAD_ID', 'CODEX_TURN_ID', 'CODEX_SESSION_ID']) delete env[key]
+  return env
+}
+
+export async function buildInstructionPatch(preflight, documents, { tempRoot = os.tmpdir() } = {}) {
+  if (!preflight?.root) throw new Error('instruction patch requires a repository preflight')
+  validateInstructionDocuments(documents)
+  const temp = fs.mkdtempSync(path.join(tempRoot, 'sab-instruction-patch-'))
+  try {
+    fs.chmodSync(temp, 0o700)
+    await execFile('git', ['init', '--quiet', temp])
+    for (const file of [preflight.agents, preflight.claude]) {
+      if (file?.exists && file.content != null) fs.writeFileSync(path.join(temp, file.name), file.content, { mode: 0o600 })
+    }
+    await execFile('git', ['-C', temp, '-c', 'core.autocrlf=false', 'add', '-A'])
+    await execFile('git', ['-C', temp, '-c', 'user.name=Slack Agent Bridge', '-c', 'user.email=bridge@localhost',
+      '-c', 'commit.gpgSign=false', 'commit', '--quiet', '--allow-empty', '-m', 'instruction baseline'])
+    fs.writeFileSync(path.join(temp, 'AGENTS.md'), documents.agents, { mode: 0o600 })
+    fs.writeFileSync(path.join(temp, 'CLAUDE.md'), documents.claude, { mode: 0o600 })
+    await execFile('git', ['-C', temp, '-c', 'core.autocrlf=false', 'add', '-A', '--', 'AGENTS.md', 'CLAUDE.md'])
+    const { stdout } = await execFile('git', ['-C', temp, '-c', 'core.autocrlf=false', 'diff', '--cached', '--binary', '--', 'AGENTS.md', 'CLAUDE.md'], {
+      maxBuffer: MAX_INSTRUCTION_PATCH_BYTES * 2,
+    })
+    if (!stdout.trim()) throw new Error('deterministic instruction patch is empty')
+    return stdout.trimEnd() + '\n'
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
 }
 
 function normalizedDiffPath(raw) {

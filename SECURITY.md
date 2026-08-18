@@ -57,9 +57,12 @@ accounts, and the Mac user running the daemon.
   capped at 64 KiB, integrity checked, stored under `~/.config/ccs/handoffs`
   with restrictive modes, and retained for two generations.
 - **Reviewed instruction changes:** automatic preflight reads only root
-  `AGENTS.md` and `CLAUDE.md`, never global provider memory. Proposed patches
-  are read-only until owner approval and are constrained by hashes, Git-root
-  paths, regular-file/symlink checks, binary/rename/mode rules, temporary apply
+  `AGENTS.md` and `CLAUDE.md`, never global provider memory. The auxiliary
+  provider runs in a private neutral directory without Slack or bridge
+  credentials and returns bounded document sections; it does not author patch
+  syntax. The bridge creates the patch deterministically. Proposed patches are
+  read-only until owner approval and are constrained by hashes, Git-root paths,
+  regular-file/symlink checks, binary/rename/mode rules, temporary apply
   validation, `git apply --check`, and the Codex instruction-size budget.
 - **Capability-bound file egress:** an accepted Slack prompt creates an opaque,
   one-use upload grant lasting at most two hours. It is bound to that sender,

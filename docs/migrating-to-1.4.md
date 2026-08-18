@@ -55,7 +55,16 @@ that points to it and contains only Claude-specific additions. An owner may:
 - switch without applying it; or
 - cancel.
 
-Proposals may touch only those two root files. Hash checks, regular-file and
+The auxiliary provider runs from a private neutral directory with Slack and
+bridge credentials removed. It returns bounded `AGENTS.md` and Claude-specific
+document sections rather than diff syntax; the bridge constructs the thin
+wrapper and Git patch deterministically. Long-running generation posts a Slack
+progress update every minute and defaults to a ten-minute ceiling. Set
+`CCS_INSTRUCTION_TIMEOUT_SECONDS` in `~/.config/ccs/env` to a bounded 60–1800
+second value when a repository needs a different ceiling.
+
+Proposals may touch only those two root files. The complete patch is attached
+for review when it exceeds the inline preview. Hash checks, regular-file and
 symlink checks, binary/rename/mode restrictions, a temporary apply validation,
 `git apply --check`, and the 32 KiB Codex instruction budget all run before an
 actual apply. Applied changes remain uncommitted for ordinary project review.
