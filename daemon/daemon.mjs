@@ -19,7 +19,7 @@ import {
   codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
-  switchActionBlocks, switchTargetLaunch,
+  switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createTopicSync } from './topic.mjs'
@@ -1147,13 +1147,41 @@ async function capturePrivateTurn(session, prompt) {
 async function captureTargetValidation(transition, prompt) {
   if (!transition?.target?.tmux || !(await tmuxAlive(transition.target.tmux))) throw new Error('target terminal is unavailable')
   const result = waitForPrivateTurn(targetValidationWaiters, transition.id)
+  result.catch(() => {}) // cancellation below is handled through this function
   if (transition.target.sid) rememberInjected(transition.target.sid, prompt)
-  try { await tmuxPaste(transition.target.tmux, prompt) }
+  try {
+    await tmuxPaste(transition.target.tmux, prompt)
+    await waitForTargetSessionClaim(transition, { sleepFn: sleep })
+  }
   catch (error) {
     const waiter = targetValidationWaiters.get(transition.id)
     if (waiter) { clearTimeout(waiter.timer); targetValidationWaiters.delete(transition.id); waiter.reject(error) }
+    throw error
   }
   return result
+}
+
+async function waitForTargetInputReady(channel, transition, timeoutMs = 5 * 60000) {
+  const startedAt = Date.now()
+  let trustNoticeSent = false
+  let startupNoticeSent = false
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!transition?.target?.tmux || !(await tmuxAlive(transition.target.tmux))) {
+      throw new Error(`${providerLabel(transition.target.provider)} target terminal closed during startup`)
+    }
+    const pane = await tmuxCapture(transition.target.tmux)
+    const startup = targetStartupState(transition.target.provider, pane)
+    if (startup === 'ready') return
+    if (startup === 'trust' && !trustNoticeSent) {
+      trustNoticeSent = true
+      await post(channel, `🔐 ${providerLabel(transition.target.provider)} is waiting for a local trust decision in Ghostty. Approve it there; the bridge will continue automatically.`)
+    } else if (!startupNoticeSent && Date.now() - startedAt >= 15000) {
+      startupNoticeSent = true
+      await post(channel, `⏳ Waiting for the ${providerLabel(transition.target.provider)} input surface before private validation…`)
+    }
+    await sleep(500)
+  }
+  throw new Error(`${providerLabel(transition.target.provider)} target did not become ready for private validation`)
 }
 
 function auxiliaryEnv() {
@@ -1458,6 +1486,7 @@ async function runProviderSwitch(channel, lineage, transition, { applyProposal =
     let up = false
     for (let i = 0; i < 40 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
     if (!up) throw new Error('target terminal did not initialize')
+    await waitForTargetInputReady(channel, transition)
     setTransitionPhase(lineage, 'target_validating')
     saveStateNow(state)
     const content = readHandoff(handoff)

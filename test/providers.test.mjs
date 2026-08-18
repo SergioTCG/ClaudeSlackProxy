@@ -9,7 +9,7 @@ import {
   defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
-  switchActionBlocks, switchTargetLaunch,
+  switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
 } from '../daemon/providers.mjs'
 
 test('legacy sessions remain Claude without a state migration', () => {
@@ -108,6 +108,38 @@ test('provider switch buttons have unique Slack action IDs', () => {
     assert.equal(new Set(ids).size, ids.length)
     assert.ok(ids.every(id => /^provider_switch_(align|apply|continue|cancel)$/.test(id)))
   }
+})
+
+test('Codex target readiness uses the visible idle footer, not stale trust scrollback', () => {
+  const ready = `Do you trust the contents of this directory?
+Press enter to continue
+
+OpenAI Codex (v0.147.0)
+› Run /review on my current changes
+gpt-5.6-sol xhigh · ~/Code/Barrique`
+  const trust = `OpenAI Codex
+Do you trust the contents of this directory?
+› 1. Trust and continue
+  2. Exit
+Press enter to continue`
+
+  assert.equal(targetStartupState('codex', ready), 'ready')
+  assert.equal(targetStartupState('codex', trust), 'trust')
+  assert.equal(targetStartupState('codex', 'Starting OpenAI Codex…'), 'starting')
+  assert.equal(targetStartupState('claude', 'Claude Code\n❯\nshift+tab to cycle'), 'ready')
+})
+
+test('target validation requires a provider hook session claim', async () => {
+  const transition = { target: { provider: 'codex', sid: null } }
+  let waits = 0
+  const claimed = await waitForTargetSessionClaim(transition, {
+    attempts: 3,
+    sleepFn: async () => { if (++waits === 2) transition.target.sid = 'codex-session' },
+  })
+  assert.equal(claimed, 'codex-session')
+  await assert.rejects(() => waitForTargetSessionClaim({ target: { provider: 'codex', sid: null } }, {
+    attempts: 2, sleepFn: async () => {},
+  }), /Codex target hooks did not register/)
 })
 
 test('Codex effort is recovered from launch overrides and root config only', () => {

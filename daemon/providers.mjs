@@ -185,6 +185,39 @@ export function switchActionBlocks(transition, preflight, stage = 'preview') {
   return [{ type: 'actions', block_id: `provider_switch_${transition.id}`, elements: actions }]
 }
 
+const stripTerminalControls = value => String(value || '')
+  .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+  .replace(/\r/g, '')
+
+// A tmux session exists before an interactive agent is ready to accept input.
+// Inspect only the visible bottom of the pane: trust text may remain above the
+// live Codex UI in scrollback, while the model/effort/path footer proves that
+// the normal input surface has materialized.
+export function targetStartupState(provider, pane) {
+  const lines = stripTerminalControls(pane).split('\n').slice(-16)
+  const visible = lines.join('\n')
+  if (provider === 'codex') {
+    const prompt = lines.some(line => /^\s*[›❯>]\s/.test(line))
+    const footer = lines.some(line => /[·•].*(?:~\/|\/)[^\s]*/.test(line))
+    if (prompt && footer && !/esc to interrupt|ctrl-c to interrupt/i.test(visible)) return 'ready'
+    if (/do you trust|trust the (?:contents|directory|folder|workspace|project)|(?:review|trust|approve|enable).{0,80}hooks?/i.test(visible)) return 'trust'
+    return 'starting'
+  }
+  if (/shift\+tab to cycle|bypass permissions/i.test(visible) && /(?:^|\n)\s*[❯>]\s*/.test(visible)) return 'ready'
+  if (/trust|development channels|approve/i.test(visible)) return 'trust'
+  return 'starting'
+}
+
+export async function waitForTargetSessionClaim(transition, {
+  attempts = 60, intervalMs = 500, sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (transition?.target?.sid) return transition.target.sid
+    if (attempt + 1 < attempts) await sleepFn(intervalMs)
+  }
+  throw new Error(`${providerLabel(transition?.target?.provider)} target hooks did not register`)
+}
+
 export function codexPermissionDecision(behavior) {
   const decision = { behavior }
   if (behavior === 'deny') decision.message = 'Denied from Slack.'

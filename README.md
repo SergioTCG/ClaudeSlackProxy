@@ -171,6 +171,13 @@ artifact grants after commit; collaborators are blocked until it finishes. On
 failure or daemon restart, the provisional target is discarded and the source
 mapping is restored.
 
+A provisional target does not receive its private validation prompt merely
+because tmux exists. The bridge waits for the visible Claude/Codex input
+surface, reports any local trust gate in Slack without answering it, and then
+requires the target's native hooks to claim the session before commit. The
+channel topic intentionally remains on the source provider throughout this
+private validation window.
+
 Each channel may therefore have one active leg and one preserved standby leg.
 Models, effort, launch flags, and Claude subscription choice stay with their
 native provider and are never translated. A round trip resumes the original

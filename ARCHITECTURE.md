@@ -88,9 +88,11 @@ Slack (private channels, Socket Mode)
 11. **Journaled two-phase provider handoff.** The source stays authoritative
     while instruction alignment is reviewed and a private SAB v1 handoff is
     captured. The bridge then stops it, starts or resumes the exact target leg
-    in a provisional tmux, and intercepts a read-only readiness turn. Only a
-    valid target response atomically moves the channel mapping. Crash recovery
-    and failures reap the exact provisional tmux and restore the source.
+    in a provisional tmux, waits for the visible agent input surface, and
+    intercepts a read-only readiness turn. Trust gates remain local and are
+    never keyed by the daemon. Only a valid response from a hook-claimed target
+    session atomically moves the channel mapping. Crash recovery and failures
+    reap the exact provisional tmux and restore the source.
 12. **Instruction files, not provider memory.** Switch preflight inspects only
     repository-root `AGENTS.md` and `CLAUDE.md`. Global Claude/Codex memory and
     `MEMORY.md` never enter automatic consolidation. A credential-scrubbed

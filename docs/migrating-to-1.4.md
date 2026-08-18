@@ -42,6 +42,13 @@ The handoff is a bounded Markdown summary, not a transcript or hidden-reasoning
 export. It explicitly excludes credentials, tokens, chain-of-thought, complete
 conversation history, and large source dumps.
 
+Target startup is also transactional. The bridge waits for the visible provider
+input surface before pasting private validation, reports a local folder/hook
+trust gate without answering it, and requires the provider's lifecycle hooks to
+claim the native session before commit. Until then the Slack topic continues to
+show the source provider deliberately. Startup, trust, hook, or validation
+failure discards the exact provisional tmux and restores the source leg.
+
 ## Repository instructions
 
 Before switching, the bridge inspects only root `AGENTS.md` and `CLAUDE.md` in

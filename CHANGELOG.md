@@ -4,6 +4,22 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0-rc.4] — 2026-08-18
+
+### Fixed
+- Provisional provider targets now wait for the actual visible agent input
+  surface instead of treating tmux creation as application readiness. This
+  prevents private validation prompts from being pasted into startup or trust
+  screens and silently lost.
+- Local folder/hook trust remains explicit: the bridge reports the wait in
+  Slack, sends no keys, and continues automatically after the operator approves
+  the prompt in Ghostty.
+- After validation input is submitted, the provisional provider must register
+  a native hook session claim within 30 seconds. Missing hooks now produce a
+  fast, visible rollback instead of an ambiguous five-minute wait.
+
+[1.4.0-rc.4]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.4.0-rc.4
+
 ## [1.4.0-rc.3] — 2026-08-18
 
 ### Fixed
