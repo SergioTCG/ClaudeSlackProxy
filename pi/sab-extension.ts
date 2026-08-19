@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext, ProjectTrustContext } from "@earendil-works/pi-coding-agent";
+import { createManagedRunner } from "./managed-run.ts";
 
 const ENDPOINT = process.env.CCS_ENDPOINT || "http://127.0.0.1:8877";
 const TMUX = process.env.CCS_TMUX || "";
@@ -10,9 +11,11 @@ const pid = process.pid;
 type BridgeMessage = {
   type: "prompt" | "control";
   text?: string;
+  privateContext?: string;
   files?: Array<{ path: string; mimetype?: string }>;
-  action?: "abort" | "model" | "effort" | "models" | "state" | "shutdown";
-  value?: string;
+  route?: "native";
+  action?: string;
+  value?: unknown;
   requestId?: string;
 };
 
@@ -23,6 +26,7 @@ let assistantTexts: string[] = [];
 let completedUsage: any;
 let currentUsage: any;
 let lastStatusAt = 0;
+const terminalReplays = new Set<string>();
 
 const eventUrl = (pathname: string) => {
   const url = new URL(pathname, ENDPOINT);
@@ -105,11 +109,12 @@ async function controlResult(ctx: ExtensionContext, message: BridgeMessage, resu
   }).catch(() => {});
 }
 
-async function handleControl(pi: ExtensionAPI, ctx: ExtensionContext, message: BridgeMessage) {
+async function handleControl(pi: ExtensionAPI, managed: any, ctx: ExtensionContext, message: BridgeMessage) {
   try {
     if (message.action === "abort") {
-      ctx.abort();
-      return controlResult(ctx, message, { ok: true });
+      const managedState = await managed.pauseForAbort(ctx);
+      if (!managedState) ctx.abort();
+      return controlResult(ctx, message, { ok: true, managed: managedState });
     }
     if (message.action === "shutdown") {
       ctx.shutdown();
@@ -141,6 +146,10 @@ async function handleControl(pi: ExtensionAPI, ctx: ExtensionContext, message: B
       pi.setThinkingLevel(level as any);
       return controlResult(ctx, message, { ok: true, ...modelState(ctx, ctx.model, pi.getThinkingLevel()) });
     }
+    if (message.action?.startsWith("managed-")) {
+      const result = await managed.control(ctx, message.action, message.value);
+      return controlResult(ctx, message, result);
+    }
     if (message.action === "state") return controlResult(ctx, message, { ok: true, ...modelState(ctx), usage: turnUsage() });
     return controlResult(ctx, message, { ok: false, error: "Unknown Pi control action." });
   } catch (error: any) {
@@ -148,41 +157,40 @@ async function handleControl(pi: ExtensionAPI, ctx: ExtensionContext, message: B
   }
 }
 
-async function handlePrompt(pi: ExtensionAPI, ctx: ExtensionContext, message: BridgeMessage) {
-  const text = String(message.text || "");
-  const files = Array.isArray(message.files) ? message.files : [];
-  const images = files.filter(file => /^image\//.test(file.mimetype || ""));
-  if (images.length && !ctx.model?.input?.includes("image")) {
+async function handlePrompt(pi: ExtensionAPI, ctx: ExtensionContext, message: BridgeMessage, managed: any) {
+  const managedState = managed.snapshot();
+  const routingState = managed.routingSnapshot();
+  if ((managedState && ["active", "paused"].includes(managedState.status)) || routingState?.status === "routing") {
     await post("/pi/event", {
-      event: "InputError", ...sessionState(ctx),
-      error: `The selected model ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(unknown)"} does not accept image input.`,
+      event: "InputError", managed: managedState, routing: routingState,
+      error: routingState?.status === "routing"
+        ? "Pi is already assessing another prompt. Wait for its routing decision or use /pi-stop."
+        : "A managed Pi run owns this session. Use /pi-run controls or cancel it before sending an ordinary prompt.",
+      ...sessionState(ctx),
     }).catch(() => {});
     return;
   }
-  const content: any[] = [{ type: "text", text }];
-  for (const file of images) {
-    try {
-      content.push({
-        type: "image",
-        mimeType: file.mimetype || "image/png",
-        data: fs.readFileSync(file.path).toString("base64"),
-      });
-    } catch (error: any) {
-      await post("/pi/event", { event: "InputError", ...sessionState(ctx), error: `Could not read attachment: ${String(error?.message || error)}` }).catch(() => {});
-      return;
-    }
+  const result = await managed.routePrompt(ctx, {
+    text: String(message.text || ""), privateContext: String(message.privateContext || ""),
+    files: Array.isArray(message.files) ? message.files : [], source: "slack",
+    forceNative: message.route === "native",
+  });
+  if (!result.ok) {
+    await post("/pi/event", {
+      event: "InputError", error: result.error, managed: managed.snapshot(),
+      routing: managed.routingSnapshot(), ...sessionState(ctx),
+    }).catch(() => {});
   }
-  pi.sendUserMessage(images.length ? content : text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 }
 
-async function handleBridgeMessage(pi: ExtensionAPI, message: BridgeMessage) {
+async function handleBridgeMessage(pi: ExtensionAPI, managed: any, message: BridgeMessage) {
   const ctx = activeContext;
   if (!ctx) return;
-  if (message.type === "control") await handleControl(pi, ctx, message);
-  else if (message.type === "prompt") await handlePrompt(pi, ctx, message);
+  if (message.type === "control") await handleControl(pi, managed, ctx, message);
+  else if (message.type === "prompt") await handlePrompt(pi, ctx, message, managed);
 }
 
-async function consumeSse(pi: ExtensionAPI, signal: AbortSignal) {
+async function consumeSse(pi: ExtensionAPI, managed: any, signal: AbortSignal) {
   const response = await fetch(eventUrl("/pi/stream"), { signal });
   if (!response.ok || !response.body) throw new Error(`stream returned HTTP ${response.status}`);
   const decoder = new TextDecoder();
@@ -196,20 +204,63 @@ async function consumeSse(pi: ExtensionAPI, signal: AbortSignal) {
       buffer = buffer.slice(boundary + 2);
       const data = record.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("\n");
       if (!data) continue;
-      try { await handleBridgeMessage(pi, JSON.parse(data)); } catch {}
+      try { await handleBridgeMessage(pi, managed, JSON.parse(data)); } catch {}
     }
   }
 }
 
-async function maintainStream(pi: ExtensionAPI, signal: AbortSignal) {
+async function maintainStream(pi: ExtensionAPI, managed: any, signal: AbortSignal) {
   while (!signal.aborted) {
-    try { await consumeSse(pi, signal); } catch {}
+    try { await consumeSse(pi, managed, signal); } catch {}
     if (signal.aborted) break;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 }
 
+async function deliverNativePrompt(pi: ExtensionAPI, ctx: ExtensionContext, value: {
+  text: string;
+  privateContext?: string;
+  files?: Array<{ path: string; mimetype?: string }>;
+  source?: "slack" | "terminal";
+}) {
+  const text = `${String(value.text || "")}${String(value.privateContext || "")}`;
+  const files = Array.isArray(value.files) ? value.files : [];
+  const images = files.filter(file => /^image\//.test(file.mimetype || ""));
+  if (images.length && !ctx.model?.input?.includes("image")) {
+    await post("/pi/event", {
+      event: "InputError", ...sessionState(ctx),
+      error: `The selected model ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(unknown)"} does not accept image input.`,
+    }).catch(() => {});
+    return;
+  }
+  const content: any[] = [{ type: "text", text }];
+  for (const file of images) {
+    try {
+      content.push({
+        type: "image", mimeType: file.mimetype || "image/png",
+        data: fs.readFileSync(file.path).toString("base64"),
+      });
+    } catch (error: any) {
+      await post("/pi/event", {
+        event: "InputError", ...sessionState(ctx),
+        error: `Could not read attachment: ${String(error?.message || error)}`,
+      }).catch(() => {});
+      return;
+    }
+  }
+  if (value.source === "terminal") terminalReplays.add(text);
+  pi.sendUserMessage(images.length ? content : text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+}
+
 export default function sabPiExtension(pi: ExtensionAPI) {
+  const managed = createManagedRunner(pi, {
+    safeMode: SAFE_MODE,
+    event: async (ctx: ExtensionContext, event: string, fields: Record<string, unknown> = {}) => {
+      await post("/pi/event", { event, ...sessionState(ctx), ...fields }).catch(() => {});
+    },
+    deliverNative: (ctx, value) => deliverNativePrompt(pi, ctx, value),
+  });
+
   pi.on("project_trust", async (event, ctx: ProjectTrustContext) => {
     if (!process.env.CCS_BRIDGE) return { trusted: "undecided" };
     try {
@@ -227,15 +278,39 @@ export default function sabPiExtension(pi: ExtensionAPI) {
     currentUsage = undefined;
     streamController?.abort();
     streamController = new AbortController();
+    const managedState = await managed.onSessionStart(ctx);
     const source = event.reason === "startup" && /(?:^|\s)(?:--session|-s)(?:=|\s)/.test(FLAGS) ? "resume" : event.reason;
-    await post("/pi/event", { event: "SessionStart", source, ...sessionState(ctx) }).catch(() => {});
-    void maintainStream(pi, streamController.signal);
+    await post("/pi/event", { event: "SessionStart", source, ...managedState, ...sessionState(ctx) }).catch(() => {});
+    void maintainStream(pi, managed, streamController.signal);
   });
 
   pi.on("input", async (event, ctx) => {
     if (!registeredSessionId) return;
     activeContext = ctx;
-    await post("/pi/event", { event: "UserPromptSubmit", prompt: event.text, source: event.source, ...sessionState(ctx) }).catch(() => {});
+    const managedState = managed.snapshot();
+    const routingState = managed.routingSnapshot();
+    if ((managedState && ["active", "paused"].includes(managedState.status)) || routingState?.status === "routing") {
+      const error = routingState?.status === "routing"
+        ? "Pi is already assessing another prompt. Wait for its routing decision or interrupt it."
+        : "A managed Pi run owns this session. Use its Slack controls or cancel it before entering an ordinary prompt.";
+      ctx.ui.notify(error, "warning");
+      await post("/pi/event", { event: "InputError", error, managed: managedState, routing: routingState, ...sessionState(ctx) }).catch(() => {});
+      return { action: "handled" };
+    }
+    const replay = event.source === "extension" && terminalReplays.delete(event.text);
+    if (!replay) {
+      await post("/pi/event", { event: "UserPromptSubmit", prompt: event.text, source: event.source, ...sessionState(ctx) }).catch(() => {});
+    }
+    if (event.source === "extension" || managed.policy() === "native" || (event as any).images?.length) return;
+    const result = await managed.routePrompt(ctx, { text: event.text, source: "terminal" });
+    if (!result.ok) {
+      ctx.ui.notify(result.error, "warning");
+      await post("/pi/event", {
+        event: "InputError", error: result.error, managed: managed.snapshot(),
+        routing: managed.routingSnapshot(), ...sessionState(ctx),
+      }).catch(() => {});
+    }
+    return { action: "handled" };
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -245,7 +320,7 @@ export default function sabPiExtension(pi: ExtensionAPI) {
     completedUsage = undefined;
     currentUsage = undefined;
     lastStatusAt = 0;
-    await post("/pi/event", { event: "AgentStart", ...sessionState(ctx) }).catch(() => {});
+    await post("/pi/event", { event: "AgentStart", managed: managed.snapshot(), ...sessionState(ctx) }).catch(() => {});
   });
 
   pi.on("message_update", async (event, ctx) => {
@@ -255,7 +330,7 @@ export default function sabPiExtension(pi: ExtensionAPI) {
     if (message?.usage) currentUsage = message.usage;
     if (Date.now() - lastStatusAt < 2500) return;
     lastStatusAt = Date.now();
-    await post("/pi/event", { event: "Status", usage: turnUsage(), ...sessionState(ctx) }).catch(() => {});
+    await post("/pi/event", { event: "Status", usage: turnUsage(), managed: managed.snapshot(), ...sessionState(ctx) }).catch(() => {});
   });
 
   pi.on("message_end", async (event, ctx) => {
@@ -273,8 +348,12 @@ export default function sabPiExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     if (!registeredSessionId) return;
     activeContext = ctx;
+    const text = assistantTexts.join("\n\n");
+    const decision = await managed.onAgentSettled(ctx, text, turnUsage());
     await post("/pi/event", {
-      event: "Stop", last_assistant_message: assistantTexts.join("\n\n"), usage: turnUsage(),
+      event: decision.mirror ? "Stop" : "ManagedCheckpoint",
+      last_assistant_message: decision.mirror ? text : undefined,
+      usage: turnUsage(), managed: managed.snapshot(),
       turn_id: ctx.sessionManager.getLeafId(), ...sessionState(ctx),
     }).catch(() => {});
     assistantTexts = [];
@@ -296,6 +375,7 @@ export default function sabPiExtension(pi: ExtensionAPI) {
     if (!registeredSessionId) return undefined;
     activeContext = ctx;
     if (!SAFE_MODE) return undefined;
+    if (event.toolName === "sab_goal") return undefined;
     try {
       const result = await post("/pi/permission", {
         session_id: ctx.sessionManager.getSessionId(), tool_name: event.toolName,
@@ -311,6 +391,7 @@ export default function sabPiExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     streamController?.abort();
     streamController = undefined;
+    managed.shutdown();
     if (_event.reason === "quit" && registeredSessionId) {
       await post("/pi/event", { event: "SessionEnd", ...sessionState(ctx) }).catch(() => {});
     }

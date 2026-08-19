@@ -17,8 +17,8 @@ for each one it has used.
 > [!WARNING]
 > **This is remote code execution by design.** Slack-spawned Claude sessions
 > default to `--dangerously-skip-permissions`; Slack-spawned Codex sessions
-> default to `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Anyone
-> Pi's built-in tools are unrestricted by default; SAB's optional `--safe`
+> default to `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Pi's
+> built-in tools are unrestricted by default; SAB's optional `--safe`
 > flag adds fail-closed Slack approval per tool call. Anyone able to act as the
 > bridge owner in Slack can steer processes on this Mac.
 > Read [SECURITY.md](SECURITY.md) before installing. This project is not
@@ -46,6 +46,7 @@ for each one it has used.
 | Live working status with time and token counters | ✓ | ✓ | ✓ |
 | Token and cost usage | `ccusage` | `ccusage` | native event ledger |
 | Handoff among providers in one Slack channel | ✓ | ✓ | ✓ |
+| Persistent plan/goal/review orchestration | — | — | adaptive; `/pi-run` controls |
 | Claude subscription switching | ✓ | — | — |
 | Chrome integration flag | `--chrome` | No counterpart | No counterpart |
 | Live web search flag | Provider-managed | `--search` | model/provider-managed |
@@ -58,7 +59,8 @@ Pi session files. Claude retains its MCP Channel and transcript/status
 integration. See [the architecture](ARCHITECTURE.md) and the
 [Claude](docs/claude-feasibility.md) and
 [Codex](docs/codex-feasibility.md) feasibility studies, plus the
-[Pi integration study](docs/pi-feasibility.md).
+[Pi integration study](docs/pi-feasibility.md). Pi's adaptive orchestration is
+documented in [Managed Pi runs](docs/pi-managed-runs.md).
 
 ## Prerequisites
 
@@ -157,12 +159,14 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 
 | In Slack | Effect |
 |---|---|
-| Any message in a session channel | Inject into that session; resume it first if dormant |
+| Any message in a session channel | Inject into that session; owner Pi prompts are adaptively routed by default |
 | File or image attachment | Download locally and provide the path to the agent |
 | “Create/export … and send it here” | Generate files and attach them back to this channel or thread |
 | `/cc-new [folder] [flags]` / `/codex-new …` / `/pi-new …` | Start the selected provider |
 | `/cc-model [model]` / `/codex-model …` / `/pi-model [provider/model]` | Show or change the provider model |
 | `/cc-effort [level]` / `/codex-effort …` / `/pi-effort …` | Show or change reasoning/thinking effort |
+| `/pi-run [plan] <goal> [budgets]` | Force a persistent planner → worker → independent-reviewer run; omit the goal for status |
+| `/pi-run mode [auto\|always\|native]` / `/pi-run direct <prompt>` | Persist the Pi routing policy or bypass it once |
 | `/cc-flags [flags]` / `/codex-flags …` / `/pi-flags …` | Show or replace allowlisted launch flags |
 | `/cc-update` / `/codex-update` / `/pi-update` | Update the selected CLI and resume the session |
 | `/cc-status` / `/codex-status` / `/pi-status` | Session details or a provider-filtered list |

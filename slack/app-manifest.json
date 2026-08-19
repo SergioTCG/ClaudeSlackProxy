@@ -43,6 +43,7 @@
       { "command": "/pi-new", "description": "Start a Pi session", "usage_hint": "[folder] [Pi flags]", "should_escape": false },
       { "command": "/pi-status", "description": "Pi session info here, or list Pi sessions", "should_escape": false },
       { "command": "/pi-usage", "description": "Pi token and context usage", "usage_hint": "[days [n] | models]", "should_escape": false },
+      { "command": "/pi-run", "description": "Control adaptive routing or force a managed Pi run", "usage_hint": "[plan] <goal> | mode [auto|always|native] | direct <prompt> | status|approve|pause|continue|cancel", "should_escape": false },
       { "command": "/pi-flags", "description": "Show or change Pi launch and trust flags", "usage_hint": "[--safe] [--approve] [--model=value]", "should_escape": false },
       { "command": "/pi-update", "description": "Update Pi and restart/resume this session", "should_escape": false },
       { "command": "/pi-stop", "description": "Interrupt this Pi session's running turn", "should_escape": false },

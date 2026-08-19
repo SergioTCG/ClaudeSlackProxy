@@ -39,6 +39,16 @@ test('provider-scoped commands have parallel Claude, Codex, and Pi namespaces', 
   }
 })
 
+test('managed-run controls remain a Pi-only command and expose adaptive policy', () => {
+  assert.ok(names.includes('/pi-run'))
+  assert.ok(!names.includes('/cc-run'))
+  assert.ok(!names.includes('/codex-run'))
+  const command = commands.find(item => item.command === '/pi-run')
+  assert.match(command.description, /managed/i)
+  assert.match(command.usage_hint, /status/)
+  assert.match(command.usage_hint, /mode/)
+})
+
 test('bridge-wide and Claude-only commands are not duplicated under Codex or Pi', () => {
   for (const name of ['claim', 'health', 'cleanup', 'account']) {
     assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)

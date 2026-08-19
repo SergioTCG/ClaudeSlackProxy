@@ -42,6 +42,9 @@ import {
   deleteHandoffs, handoffPrompt, readHandoff, targetBootstrapPrompt, validateBootstrapReply, writeHandoff,
 } from './handoffs.mjs'
 import {
+  normalizeManagedPolicy, parseManagedRunCommand, sanitizeManagedSnapshot, sanitizeRoutingSnapshot,
+} from '../pi/managed-core.mjs'
+import {
   buildInstructionDocuments, buildInstructionPatch, deterministicWrapperPatch, fingerprintsMatch,
   inspectInstructions, instructionDocumentsPrompt, instructionProgressText, instructionProposalTimeout,
   parseInstructionDocuments,
@@ -78,6 +81,7 @@ process.on('uncaughtException', e => log('uncaughtException:', e?.stack || Strin
 const streams = new Map()
 const piControlWaiters = new Map() // request id → bounded settings/status command resolver
 const pendingSpawnChannels = new Map() // tmux → Slack channel that requested a not-yet-registered Pi spawn
+
 // sid → texts injected from Slack, awaiting their UserPromptSubmit echo (dedup)
 const injectedRecently = new Map()
 function rememberInjected(sid, text) {
@@ -208,8 +212,8 @@ async function postMd(channel, md) {
 // The agent sees how to invoke it, but never gets to choose the destination:
 // the daemon binds the opaque grant to this session, channel, provider, sender,
 // and workspace. Unused grants expire in memory and are pruned on later use.
-function withArtifactDelivery(session, text, request) {
-  if (!request?.userId || !session?.channel || !session?.cwd) return text
+function artifactDeliveryContext(session, request) {
+  if (!request?.userId || !session?.channel || !session?.cwd) return ''
   try {
     const { token } = artifactGrants.issue({
       sessionId: session.id,
@@ -222,11 +226,15 @@ function withArtifactDelivery(session, text, request) {
       threadTs: request.threadTs,
       workspaceRoot: session.cwd,
     })
-    return text + artifactDeliveryInstruction(token)
+    return artifactDeliveryInstruction(token)
   } catch (error) {
     log('artifact grant unavailable', session.id.slice(0, 8), error?.code || String(error))
-    return text
+    return ''
   }
+}
+
+function withArtifactDelivery(session, text, request) {
+  return text + artifactDeliveryContext(session, request)
 }
 
 const ensureSessionChannel = createSessionChannelGate()
@@ -513,8 +521,12 @@ function startPiPoller(session) {
   const tick = async () => {
     if (p.stopped || !(session.pid && pidAlive(session.pid))) return
     const text = formatPiWorkingStatus({
-      startedAt: session.piTurnStartedAt,
+      startedAt: session.managed?.status === 'active' ? session.managed.startedAt
+        : session.piRouting?.status === 'routing' ? session.piRouting.startedAt
+          : session.piTurnStartedAt,
       usage: normalizePiUsage(session.piTurnUsage, session.piContextUsage),
+      managed: session.managed?.status === 'active' ? session.managed : null,
+      routing: session.piRouting?.status === 'routing' ? session.piRouting : null,
     })
     if (text !== p.last) { p.last = text; await setStatus(session, text) }
   }
@@ -880,6 +892,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
   if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) session.model = body.model
+  const previousManagedId = session.managed?.id || null
   if (provider === 'pi') {
     if (body.model) session.model = body.model
     if (body.model_name) session.modelName = body.model_name
@@ -887,6 +900,9 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     if (body.effort) session.effort = body.effort
     if (body.context_usage) session.piContextUsage = body.context_usage
     if (body.usage) session.piTurnUsage = body.usage
+    if (body.managed !== undefined) session.managed = sanitizeManagedSnapshot(body.managed)
+    if (body.managed_policy !== undefined) session.managedPolicy = normalizeManagedPolicy(body.managed_policy)
+    if (body.routing !== undefined) session.piRouting = sanitizeRoutingSnapshot(body.routing)
     sessionMeta.set(session.id, {
       ...(sessionMeta.get(session.id) || {}),
       model: session.modelName || session.model,
@@ -925,6 +941,80 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   }
   if (provider === 'pi' && ev === 'InputError') {
     if (session.channel) await post(session.channel, `⚠️ ${String(body.error || 'Pi could not accept that input.').slice(0, 500)}`)
+    return
+  }
+  if (provider === 'pi' && ev === 'ManagedCheckpoint') {
+    recordPiUsage(session, body)
+    session.piTurnUsage = null
+    saveState(state)
+    return
+  }
+  if (provider === 'pi' && ev === 'ManagedChildUsage') {
+    recordPiUsage(session, body)
+    session.piTurnUsage = null
+    saveState(state)
+    return
+  }
+  if (provider === 'pi' && ev === 'ManagedRouting') {
+    session.piTurnStartedAt = session.piRouting?.startedAt || Date.now()
+    session.piTurnUsage = null
+    startPiPoller(session)
+    saveState(state)
+    return
+  }
+  if (provider === 'pi' && ev === 'ManagedRoute') {
+    if (body.usage) recordPiUsage(session, body)
+    session.piTurnUsage = null
+    stopPoller(session)
+    await clearStatus(session)
+    if (session.channel && body.route === 'managed') {
+      await post(session.channel, `🧭 *Promoted to a managed Pi run* — ${String(body.reason || 'this task benefits from planning, validation, and review').slice(0, 1000)}`)
+    }
+    saveState(state)
+    return
+  }
+  if (provider === 'pi' && ev === 'ManagedPolicy') {
+    saveState(state)
+    return
+  }
+  if (provider === 'pi' && ['ManagedStatus', 'ManagedPlan', 'ManagedReview'].includes(ev)) {
+    const managed = session.managed
+    if (managed?.status === 'active') {
+      if (managed.id !== previousManagedId) session.piTurnUsage = null
+      session.piTurnStartedAt ||= managed.startedAt || Date.now()
+      startPiPoller(session)
+    } else {
+      stopPoller(session)
+      await clearStatus(session)
+    }
+    if (session.channel && ev === 'ManagedPlan' && body.plan && session.lastManagedPlanId !== managed?.id) {
+      const plan = body.plan
+      const steps = Array.isArray(plan.steps)
+        ? plan.steps.slice(0, 24).map((step, index) => `${Number(step.id) || index + 1}. ${String(step.text || '').slice(0, 1000)}`).join('\n')
+        : ''
+      const risks = Array.isArray(plan.risks) && plan.risks.length
+        ? `\n\n*Risks*\n${plan.risks.slice(0, 12).map(risk => `• ${String(risk).slice(0, 1000)}`).join('\n')}`
+        : ''
+      await postMd(session.channel,
+        `📋 *Managed Pi plan*${plan.summary ? ` — ${String(plan.summary).slice(0, 1500)}` : ''}\n\n${steps}${risks}\n\n` +
+        (body.auto ? '_Executing automatically. Use `/pi-run pause` to pause._' : '_Waiting for `/pi-run approve`._'))
+      session.lastManagedPlanId = managed?.id || null
+    }
+    if (session.channel && ev === 'ManagedReview' && body.review?.verdict === 'fix') {
+      const findings = Array.isArray(body.review.findings)
+        ? body.review.findings.slice(0, 20).map(item => `• ${String(item).slice(0, 1500)}`).join('\n')
+        : ''
+      await postMd(session.channel, `🔎 *Managed review requested fixes*\n${findings || String(body.review.summary || 'Review found changes to make.').slice(0, 3000)}`)
+    }
+    if (session.channel && ev === 'ManagedReview' && body.review?.verdict === 'pass') {
+      await post(session.channel, '✅ Independent managed review passed — preparing the final response…')
+    }
+    if (body.notice && managed?.status !== 'complete') {
+      stopPoller(session)
+      await clearStatus(session)
+      if (session.channel) await post(session.channel, `⚠️ ${String(body.notice).slice(0, 3000)}`)
+    }
+    saveState(state)
     return
   }
   if (provider === 'pi' && (ev === 'Status' || ev === 'Settings')) {
@@ -974,9 +1064,9 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       const tn = session.tmux
       setTimeout(async () => {
         for (const m of queued) {
-          rememberInjected(sid, m)
+          rememberInjected(sid, queuedPromptText(m))
           if (provider === 'pi') {
-            if (!injectToSession(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
+            if (!injectQueuedPiPrompt(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
           } else await tmuxPaste(tn, m).catch(e => log('flush paste failed', String(e)))
           await sleep(500)
         }
@@ -1128,16 +1218,37 @@ async function applyVerdict(rid, behavior, channel, ts) {
 }
 
 // ---- injection & resurrection ----------------------------------------------
-function injectToSession(pid, text, files = []) {
+function injectToSession(pid, text, files = [], privateContext = '', route = null) {
   const s = streams.get(pid)
   if (s) {
     const payload = s.provider === 'pi'
-      ? { type: 'prompt', text, ...(files.length ? { files } : {}) }
+      ? {
+          type: 'prompt', text,
+          ...(files.length ? { files } : {}),
+          ...(privateContext ? { privateContext } : {}),
+          ...(route ? { route } : {}),
+        }
       : { type: 'message', text }
     s.res.write(`data: ${JSON.stringify(payload)}\n\n`)
     return true
   }
   return false
+}
+
+function piPromptQueueItem(text, { files = [], privateContext = '', route = null } = {}) {
+  return {
+    text: String(text || ''), files: Array.isArray(files) ? files : [],
+    privateContext: String(privateContext || ''), route,
+  }
+}
+
+function queuedPromptText(value) {
+  return typeof value === 'string' ? value : `${String(value?.text || '')}${String(value?.privateContext || '')}`
+}
+
+function injectQueuedPiPrompt(pid, value) {
+  if (typeof value === 'string') return injectToSession(pid, value)
+  return injectToSession(pid, value?.text, value?.files, value?.privateContext, value?.route)
 }
 
 function sendPiControl(session, action, value = null, timeoutMs = 15000) {
@@ -1302,7 +1413,7 @@ async function capturePrivateTurn(session, prompt) {
   rememberInjected(session.id, prompt)
   try {
     if (providerOf(session) === 'pi') {
-      if (!injectToSession(session.pid, prompt)) throw new Error('Pi control stream is unavailable')
+      if (!injectToSession(session.pid, prompt, [], '', 'native')) throw new Error('Pi control stream is unavailable')
     } else await tmuxPaste(session.tmux, prompt)
   }
   catch (error) {
@@ -1324,7 +1435,7 @@ async function captureTargetValidation(transition, prompt) {
         if (transition.target.provider !== 'pi') return tmuxPaste(transition.target.tmux, prompt)
         const target = state.sessions[transition.target.sid]
         rememberInjected(transition.target.sid, prompt)
-        if (!target || !injectToSession(target.pid, prompt)) throw new Error('Pi target control stream is unavailable')
+        if (!target || !injectToSession(target.pid, prompt, [], '', 'native')) throw new Error('Pi target control stream is unavailable')
       },
     })
   }
@@ -1802,6 +1913,19 @@ async function handleSlackMessage(channel, text, sender, request) {
     return post(channel, `⏸️ Provider switch in progress — queued your message (${position}).`)
   }
 
+  const managedSession = sessionByChannel(channel)
+  if (providerOf(managedSession) === 'pi' && (
+    ['active', 'paused'].includes(managedSession?.managed?.status) || managedSession?.piRouting?.status === 'routing'
+  )) {
+    if (!sender && !(managedSession.pid && pidAlive(managedSession.pid))) {
+      await resurrect(managedSession)
+      return
+    }
+    return post(channel, managedSession?.piRouting?.status === 'routing'
+      ? '🧭 Pi is already assessing another prompt. Wait for its routing decision or use `/pi-stop`.'
+      : '🧭 A managed Pi run owns this session. Use `/pi-run status`, `/pi-run pause`, `/pi-run continue`, or `/pi-run cancel`; ordinary prompts resume after it completes or is cancelled.')
+  }
+
   // Collaborators may only send prompts into a LIVE session: no permission
   // verdicts, no commands, and no resurrection (that would spawn a terminal on
   // the host). The prompt is attributed so the transcript shows who sent it.
@@ -1811,7 +1935,13 @@ async function handleSlackMessage(channel, text, sender, request) {
     if (!(session.pid && pidAlive(session.pid))) {
       return post(channel, `💤 Session is dormant — <@${sender.id}>’s message wasn’t delivered. Only the owner can resume it.`)
     }
-    return injectText(session, withArtifactDelivery(session, `[Slack collaborator ${sender.name}]\n${trimmed}`, request))
+    const attributed = `[Slack collaborator ${sender.name}]\n${trimmed}`
+    if (providerOf(session) === 'pi') {
+      return injectText(session, attributed, {
+        privateContext: artifactDeliveryContext(session, request), route: 'native',
+      })
+    }
+    return injectText(session, withArtifactDelivery(session, attributed, request))
   }
 
   // The ./ commands were retired in favour of native namespaced slash commands; nudge.
@@ -1845,37 +1975,49 @@ async function handleSlackMessage(channel, text, sender, request) {
     }
     return post(channel, '❓ A question form is open — tap a button above or reply with just its number.')
   }
-  await injectText(session, withArtifactDelivery(session, trimmed, request))
+  if (providerOf(session) === 'pi') {
+    await injectText(session, trimmed, { privateContext: artifactDeliveryContext(session, request) })
+  } else await injectText(session, withArtifactDelivery(session, trimmed, request))
 }
 const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kill', 'cleanup', 'stop', 'help'])
 
 // Deliver text into a session: prefer a tmux paste (full text shows in the TUI),
 // fall back to a channel event, and resurrect the session if it's gone.
-async function injectText(session, text) {
+async function injectText(session, text, options = {}) {
   const alive = session.pid && pidAlive(session.pid)
-  if (alive && providerOf(session) === 'pi' && injectToSession(session.pid, text)) {
-    rememberInjected(session.id, text)
-    log('inject (Pi extension) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
+  if (providerOf(session) === 'pi') {
+    const queuedPrompt = piPromptQueueItem(text, options)
+    const combined = queuedPromptText(queuedPrompt)
+    if (alive && injectQueuedPiPrompt(session.pid, queuedPrompt)) {
+      rememberInjected(session.id, combined)
+      log('inject (Pi extension) → session', session.id.slice(0, 8), JSON.stringify(String(text).slice(0, 50)))
+      return
+    }
+    log('queue Pi prompt', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
+    const queued = pendingBySid.get(session.id) || []
+    pendingBySid.set(session.id, [...queued, queuedPrompt])
+    if (!alive) await resurrect(session, text)
     return
   }
+  const delivered = `${String(text || '')}${String(options.privateContext || '')}`
   if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
-    rememberInjected(session.id, text)
+    rememberInjected(session.id, delivered)
     try {
-      await tmuxPaste(session.tmux, text)
-      log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
+      await tmuxPaste(session.tmux, delivered)
+      log('inject (tmux) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
       return
     } catch (e) {
       log('tmux paste failed, falling back to channel event', String(e))
     }
   }
-  if (alive && injectToSession(session.pid, text)) {
-    log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
+  if (alive && injectToSession(session.pid, delivered)) {
+    log('inject (channel) → session', session.id.slice(0, 8), JSON.stringify(delivered.slice(0, 50)))
     return
   }
   log('resurrect', session.id.slice(0, 8), 'pid', session.pid, 'cwd', session.cwd)
   const q = pendingBySid.get(session.id) || []
-  pendingBySid.set(session.id, [...q, text])
-  if (!alive) await resurrect(session, text)
+  pendingBySid.set(session.id, [...q, delivered])
+  if (!alive) await resurrect(session, delivered)
 }
 
 // Fetch a Slack file with the bot token. Slack redirects url_private to its file
@@ -1909,6 +2051,13 @@ async function handleAttachments(channel, caption, files, sender, request) {
   }
   const session = sessionByChannel(channel)
   if (!session) { log('attachment in unmapped channel, ignored', channel); return }
+  if (providerOf(session) === 'pi' && (
+    ['active', 'paused'].includes(session.managed?.status) || session.piRouting?.status === 'routing'
+  )) {
+    return post(channel, session.piRouting?.status === 'routing'
+      ? '🧭 Pi is already assessing another prompt. Wait for its routing decision or use `/pi-stop`.'
+      : '🧭 A managed Pi run owns this session. Cancel it before sending another attachment.')
+  }
   if (sender && !(session.pid && pidAlive(session.pid))) {
     return post(channel, `💤 Session is dormant — <@${sender.id}>’s attachment wasn’t delivered. Only the owner can resume it.`)
   }
@@ -1937,12 +2086,13 @@ async function handleAttachments(channel, caption, files, sender, request) {
     ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
     : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
   const attributed = sender ? `[Slack collaborator ${sender.name}]\n${body}` : body
-  const delivered = withArtifactDelivery(session, attributed, request)
-  if (providerOf(session) === 'pi' && session.pid && pidAlive(session.pid) &&
-      injectToSession(session.pid, delivered, saved)) {
-    rememberInjected(session.id, delivered)
-    return
+  if (providerOf(session) === 'pi') {
+    return injectText(session, attributed, {
+      files: saved, privateContext: artifactDeliveryContext(session, request),
+      route: sender ? 'native' : null,
+    })
   }
+  const delivered = withArtifactDelivery(session, attributed, request)
   await injectText(session, delivered)
 }
 
@@ -2349,7 +2499,7 @@ async function setPiSetting(session, name, value) {
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
 
-const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch'])
+const SESSION_SCOPED_COMMANDS = new Set(['status', 'usage', 'kill', 'model', 'effort', 'stop', 'update', 'restart', 'flags', 'switch', 'run'])
 const CLAUDE_ONLY_COMMANDS = new Set(['account'])
 const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
 
@@ -2358,6 +2508,9 @@ function commandHelp(provider) {
     return '*Pi commands* — type `/pi-` to autocomplete\n' +
       '`/pi-new [folder] [--safe] [--approve]` — start a Pi session (native tools are otherwise unrestricted)\n' +
       '`/pi-model [provider/model]` · `/pi-effort [level]` — show or set Pi model/thinking\n' +
+      '`/pi-run [plan] <goal>` — force a managed planner → worker → reviewer run; no args shows status\n' +
+      '`/pi-run mode [auto|always|native]` · `/pi-run direct <prompt>` — adaptive policy and one-turn bypass\n' +
+      '`/pi-run status|approve|pause|continue|cancel` — control the persisted managed goal\n' +
       '`/pi-update` — update Pi and restart/resume this session\n' +
       '`/pi-flags [--safe --approve --offline …]` — show or change Pi launch flags\n' +
       '`/pi-stop` — interrupt the running turn\n' +
@@ -2397,7 +2550,7 @@ function commandHelp(provider) {
 
 // Provider namespaces are explicit at ingress: /cc-* is Claude, /codex-* is
 // Codex, and /pi-* is Pi. The implementation remains shared below.
-async function dispatch(name, rest, channel, commandProvider = 'claude') {
+async function dispatch(name, rest, channel, commandProvider = 'claude', request = null) {
   const cmd = commandName => slackCommand(commandProvider, commandName)
   if (name === 'help') {
     return post(channel, commandHelp(commandProvider))
@@ -2414,8 +2567,83 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
   if (channelTransition && SESSION_SCOPED_COMMANDS.has(name) && !['status', 'switch'].includes(name)) {
     return post(channel, `⏳ Provider switch is in its \`${channelTransition.phase}\` phase. Wait for commit/rollback before changing or ending either native leg.`)
   }
+  if (name === 'run') {
+    if (commandProvider !== 'pi') return post(channel, 'Managed runs are Pi-specific. Use `/pi-run` in an active Pi session channel.')
+    if (!channelSession) return post(channel, 'Use `/pi-run` in an active Pi session channel.')
+    if (!(channelSession.pid && pidAlive(channelSession.pid))) return post(channel, 'Pi is dormant — send a message to wake the session, then retry `/pi-run`.')
+    const parsed = parseManagedRunCommand(rest)
+    if (parsed.error) return post(channel, `❌ ${parsed.error}\nUsage: \`/pi-run [plan] <goal> [--minutes=N --turns=N --agents=N --reviews=N]\`, \`/pi-run mode [auto|always|native]\`, \`/pi-run direct <prompt>\`, or a control action.`)
+    const actions = {
+      start: 'managed-start', status: 'managed-status', approve: 'managed-approve',
+      pause: 'managed-pause', continue: 'managed-continue', cancel: 'managed-cancel',
+      policy: 'managed-policy', 'policy-status': 'managed-policy-status', direct: 'managed-direct',
+    }
+    if (parsed.action === 'start') {
+      await post(channel, parsed.mode === 'plan'
+        ? '🧭 Starting a read-only planning subagent…'
+        : '🧭 Starting a managed Pi run: planner → worker → independent reviewer…')
+    }
+    let result
+    try {
+      let value = null
+      if (parsed.action === 'start') {
+        value = {
+            goal: parsed.goal, mode: parsed.mode, budgets: parsed.budgets,
+            privateContext: artifactDeliveryContext(channelSession, request),
+          }
+      } else if (parsed.action === 'policy') value = { policy: parsed.policy }
+      else if (parsed.action === 'direct') {
+        value = { goal: parsed.goal, privateContext: artifactDeliveryContext(channelSession, request) }
+        rememberInjected(channelSession.id, `${value.goal}${value.privateContext}`)
+      }
+      result = await sendPiControl(channelSession, actions[parsed.action], value)
+    } catch (error) {
+      return post(channel, `⚠️ Managed Pi command failed: ${String(error?.message || error).slice(0, 500)}`)
+    }
+    if (!result?.ok) return post(channel, `❌ ${String(result?.error || 'Pi rejected the managed-run command.').slice(0, 1000)}`)
+    const managed = result.managed
+    if (parsed.action === 'status' || parsed.action === 'policy-status') {
+      const policy = normalizeManagedPolicy(result.managed_policy)
+      if (!managed) {
+        const routing = result.routing?.status === 'routing'
+          ? ` Pi is currently assessing a prompt (${String(result.routing.reason || 'pending decision').slice(0, 500)}).`
+          : ''
+        return post(channel, `Adaptive Pi routing is \`${policy}\`. No managed run exists in this Pi session.${routing}`)
+      }
+      const plan = Array.isArray(result.plan) && result.plan.length
+        ? '\n' + result.plan.map(step => `${step.status === 'done' ? '✅' : '▫️'} ${Number(step.id) || '•'}. ${String(step.text || '').slice(0, 1000)}`).join('\n')
+        : ''
+      return postMd(channel,
+        `*Managed run ${managed.id.slice(0, 8)}*\n` +
+        `| Field | Value |\n|---|---|\n` +
+        `| Adaptive policy | ${policy} |\n` +
+        `| Status | ${managed.status} · ${managed.phase} |\n` +
+        `| Goal | ${String(managed.goal || '').replace(/\|/g, '\\|')} |\n` +
+        `| Progress | ${managed.completedSteps}/${managed.totalSteps} steps |\n` +
+        `| Parent turns | ${managed.counters?.parentTurns || 0}/${managed.budgets?.maxParentTurns || '—'} |\n` +
+        `| Subagents | ${managed.counters?.subagents || 0}/${managed.budgets?.maxSubagents || '—'} |\n` +
+        `| Review cycles | ${managed.counters?.reviewCycles || 0}/${managed.budgets?.maxReviewCycles || '—'} |${plan}`)
+    }
+    const replies = {
+      start: `✅ Managed run \`${managed?.id?.slice(0, 8) || 'started'}\` accepted. The plan will appear here before execution.`,
+      policy: `✅ Adaptive Pi routing → \`${normalizeManagedPolicy(result.managed_policy)}\``,
+      direct: '▶️ Sent directly to native Pi without managed routing.',
+      approve: '▶️ Plan approved; managed execution started.',
+      pause: '⏸️ Managed run paused. Resume with `/pi-run continue`.',
+      continue: '▶️ Managed run continuing from persisted state.',
+      cancel: result.routing_cancelled
+        ? '🛑 Adaptive routing cancelled; the queued prompt was not delivered.'
+        : '🛑 Managed run cancelled; its history remains in the native Pi session.',
+    }
+    return post(channel, replies[parsed.action])
+  }
   if (name === 'switch') {
     if (!channelSession) return post(channel, `Use \`${cmd('switch')}\` in an active ${providerLabel(commandProvider)} session channel.`)
+    if (channelSession.managed?.status === 'active' || channelSession.piRouting?.status === 'routing') {
+      return post(channel, channelSession.piRouting?.status === 'routing'
+        ? '⏳ This Pi session is assessing a prompt. Cancel it with `/pi-stop` before switching providers.'
+        : '⏳ This Pi session has an active managed run. Pause it with `/pi-run pause` before switching providers.')
+    }
     const words = rest.map(word => word.toLowerCase())
     const replaceMissing = words.includes('new')
     const requested = words.find(word => PROVIDERS.includes(word)) || null
@@ -2452,6 +2680,12 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
         `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
         `| Model | ${meta.model || readModel(session) || '—'} |\n` +
         `| Effort | ${meta.effort || session.effort || '—'} |\n` +
+        (providerOf(session) === 'pi'
+          ? `| Adaptive routing | ${normalizeManagedPolicy(session.managedPolicy)}${session.piRouting?.status === 'routing' ? ' · assessing prompt' : ''} |\n`
+          : '') +
+        (providerOf(session) === 'pi' && session.managed
+          ? `| Managed run | ${session.managed.status} · ${session.managed.phase} · ${session.managed.completedSteps}/${session.managed.totalSteps} steps |\n`
+          : '') +
         standbys.map(({ provider, session: standby }) => `| Standby leg | ${providerLabel(provider)} · ${standby.id.slice(0, 8)} · ${standby.pid && pidAlive(standby.pid) ? '⚠️ unexpectedly live' : 'preserved'} |\n`).join('') +
         (lineage?.transition ? `| Transition | ${lineage.transition.phase} → ${providerLabel(lineage.transition.target.provider)} |\n` : '') +
         `| Changes | ${changes} |` +
@@ -2487,6 +2721,9 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
       ? Object.values(state.sessions).find(s => providerOf(s) === commandProvider && s.id.startsWith(rest[0]))
       : sessionByChannel(channel)
     if (!target) return post(channel, `No matching ${providerLabel(commandProvider)} session — use \`${cmd('kill')}\` in a session channel, or \`${cmd('kill')} <id-prefix>\`.`)
+    if (providerOf(target) === 'pi' && target.pid && pidAlive(target.pid) && target.managed?.status === 'active') {
+      try { await sendPiControl(target, 'managed-cancel') } catch {}
+    }
     if (target.tmux) await tmuxKill(target.tmux)
     if (target.pid && pidAlive(target.pid)) { try { process.kill(target.pid) } catch {} }
     stopPoller(target)
@@ -2590,8 +2827,11 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
     if (providerOf(session) === 'pi') {
-      try { await sendPiControl(session, 'abort') }
+      let result
+      try { result = await sendPiControl(session, 'abort') }
       catch (error) { return post(channel, `⚠️ Pi interrupt failed: ${String(error?.message || error).slice(0, 200)}`) }
+      if (result?.managed?.routing_cancelled) return post(channel, '⎋ *Interrupted* adaptive routing; the queued prompt was not delivered.')
+      if (result?.managed?.status === 'paused') return post(channel, '⎋ *Interrupted* the turn and paused its managed run. Resume with `/pi-run continue`.')
     } else await tmuxInterrupt(session.tmux, providerOf(session))
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
@@ -2910,6 +3150,20 @@ http.createServer(async (req, res) => {
     res.write(': connected\n\n')
     streams.set(pid, { res, provider: 'pi' })
     log('Pi extension stream attached pid', pid)
+    if (session) {
+      const queued = pendingBySid.get(session.id) || []
+      if (queued.length) {
+        pendingBySid.set(session.id, [])
+        for (const item of queued) {
+          rememberInjected(session.id, queuedPromptText(item))
+          if (!injectQueuedPiPrompt(pid, item)) {
+            log('Pi reconnect flush failed', session.id.slice(0, 8))
+            pendingBySid.set(session.id, queued.slice(queued.indexOf(item)))
+            break
+          }
+        }
+      }
+    }
     const ka = setInterval(() => { try { res.write(': ka\n\n') } catch {} }, 15000)
     req.on('close', () => { clearInterval(ka); if (streams.get(pid)?.res === res) streams.delete(pid) })
     return
@@ -3104,7 +3358,7 @@ sm.on('slash_commands', async ({ body, ack }) => {
     if (body.user_id !== USER) return
     const rest = String(body.text || '').trim().split(/\s+/).filter(Boolean)
     log('slash', body.command, JSON.stringify(body.text || ''))
-    await dispatch(name, rest, body.channel_id, provider)
+    await dispatch(name, rest, body.channel_id, provider, { userId: body.user_id })
   } catch (e) {
     log('slash error', String(e))
     const delivered = await reportSlashFailure(body, { postChannel: post, postEphemeral: respondEphemeral })

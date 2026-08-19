@@ -46,7 +46,15 @@ Slack (private channels, Socket Mode)
   authenticated-by-local-process SSE stream to the loopback daemon, injects
   prompts and supported images with `sendUserMessage`, posts lifecycle/final
   text and native usage, controls model/thinking/abort, and optionally blocks
-  tool calls pending Slack approval. Pi session files are not parsed.
+  tool calls pending Slack approval. Ordinary owner input is also intercepted
+  for adaptive routing; extension-reinjected native prompts bypass the router
+  exactly once. Pi session files are not parsed.
+- **`pi/managed-run.ts`** — adaptive local-model orchestration controlled by
+  `/pi-run`. It persists routing policy/pending decisions and a bounded
+  goal/plan state through Pi's extension API,
+  drives the parent worker across multiple turns, launches isolated child Pi
+  planners/scouts/reviewers, and requires independent review before the final
+  response. `pi/managed-core.mjs` contains the daemon-safe parser/state model.
 - **`bin/sab-upload`** — a provider-neutral agent helper. It submits generated
   file paths to the loopback daemon with the session's provider/tmux identity
   and a one-use grant supplied only by an accepted Slack prompt. It cannot
@@ -123,6 +131,16 @@ Slack (private channels, Socket Mode)
     fail-closed per-tool Slack gate. The bridge never describes one as the
     other, and Pi's unrestricted default does not receive a fictional
     Claude/Codex flag alias.
+14. **Managed Pi orchestration is adaptive and bounded.** Ordinary owner prompts
+    default to `auto`: an isolated no-tools, low-thinking router chooses native
+    delivery or a persisted planning/execution/review state machine. Ambiguous
+    or failed classifications promote to managed; collaborators stay native.
+    `always` and `native` policies are session-persistent, `/pi-run direct`
+    bypasses once, and `/pi-run <goal>` always forces the managed state machine.
+    Child processes receive the selected model/thinking setting and role-bound
+    tools, but no bridge/session/upload identity, extensions, skills, themes, or
+    project-resource approval. Read-only review is reserved in the subagent
+    budget and must pass before the final response is mirrored.
 
 ## Command grammar (Slack)
 
@@ -135,6 +153,9 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 | `/cc-model`, `/cc-effort`, `/cc-flags`, `/cc-update` | Claude session | inspect/change Claude settings; restart/resume where required |
 | `/codex-model`, `/codex-effort`, `/codex-flags`, `/codex-update` | Codex session | inspect/change Codex settings; restart/resume where required |
 | `/pi-model`, `/pi-effort`, `/pi-flags`, `/pi-update` | Pi session | inspect/change native Pi model/thinking/launch settings |
+| `/pi-run [plan] <goal> [--minutes=N --turns=N --agents=N --reviews=N]` | live Pi session | start a managed goal; `plan` pauses after planning; no arguments shows status |
+| `/pi-run mode [auto\|always\|native]`, `/pi-run direct <prompt>` | live Pi session | inspect/change persistent adaptive routing or bypass it once |
+| `/pi-run approve\|pause\|continue\|cancel` | live Pi session | control the persisted managed run |
 | `/cc-stop`, `/codex-stop`, `/pi-stop` | matching session | interrupt the running turn through the provider adapter |
 | provider `-switch <target> [new]` | matching active, idle session | preview and transactionally hand the channel to another provider; `new` explicitly replaces missing saved-leg state |
 | `/cc-status`, `/codex-status`, `/pi-status` | anywhere | session info here; provider-filtered table from control |
@@ -152,6 +173,10 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - `SessionStart(resume)` → reuse mapped channel, "▶️ resumed".
 - `SessionStart(clear)` → rebind channel to the new session id (same pid), "🧹 cleared".
 - `SessionEnd` / liveness sweep (30s, `kill -0`) → "💤 session ended — write here to resume".
+- Managed Pi run → read-only child plan → optional approval → repeated parent
+  turns and scoped subagents → read-only independent review → fixes/re-review
+  or one final mirrored response. Pause, interruption, process exit, and daemon
+  restart leave a resumable state entry in the native Pi session.
 - Provider switch → preflight → optional reviewed instruction patch → private
   source handoff → provisional target readiness → atomic channel commit. Owner
   messages queue by channel in the private transition journal; collaborators
@@ -172,6 +197,10 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - Pi capabilities depend on its installed version and selected model. Native
   image delivery is rejected visibly for text-only models; Pi has no Chrome
   flag counterpart.
+- Managed Pi subagents are sequential and normally use the same configured
+  local model as the parent. The bridge supplies orchestration and budgets; it
+  cannot make a weak model reason like a stronger one or provide hardware-level
+  parallelism on a single inference server.
 - Ghostty on macOS has no reliable IPC for adding windows to one running app
   instance. Dockless accessory windows are supported; single-icon mode remains
   best-effort.

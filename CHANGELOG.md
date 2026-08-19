@@ -4,6 +4,44 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.2] — 2026-08-19
+
+### Added
+- **Adaptive Pi orchestration.** Ordinary owner prompts now default to an
+  isolated, tool-free, low-thinking complexity decision and are automatically
+  promoted when planning, persistent goals, subagents, validation, or review
+  would help. The native session persists `auto`, `always`, or `native` policy;
+  `/pi-run direct <prompt>` bypasses routing once and `/pi-run <goal>` remains
+  the force-managed path. Collaborator prompts remain native.
+- **Crash-safe routing and Slack feedback.** A pending decision survives
+  terminal/daemon restart without exposing artifact-upload capabilities to the
+  classifier or daemon snapshots. Slack shows live assessment status and a
+  durable promotion reason; interrupt/cancel and failure paths are explicit.
+- **Managed Pi runs.** `/pi-run <goal>` adds a persistent bridge-owned
+  planner → worker → independent-reviewer loop for complex local-model work.
+  `/pi-run plan <goal>` pauses after the read-only plan for explicit approval.
+- **Bounded long-running goals.** Managed state and step progress live in the
+  native Pi session, survive terminal and daemon restarts, and continue until
+  independent review passes or an explicit time, parent-turn, subagent, or
+  review-cycle budget is reached.
+- **Isolated Pi subagents.** The parent can invoke focused planner, scout,
+  reviewer, and opt-in worker children. Children inherit the selected model and
+  thinking level but never inherit the Slack bridge, upload grant, session,
+  extensions, skills, themes, or project-resource approval.
+- **Slack progress and control.** Plans, current phase/step/role, counters,
+  review findings, failure notices, and completion appear in the session
+  channel. Owner-only status, approve, pause, continue, and cancel actions are
+  available under `/pi-run`.
+
+### Safety
+- Planning, scouting, and review children are read-only. Worker children are
+  disabled under SAB `--safe`; the parent remains behind the existing Slack
+  tool-approval gate.
+- Managed execution does not widen Pi's ordinary filesystem or process
+  privileges. Budgets prevent silent indefinite loops but are not a sandbox.
+
+[1.5.0-rc.2]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.2
+
 ## [1.5.0-rc.1] — 2026-08-19
 
 ### Added

@@ -27,7 +27,7 @@ unchanged.
 Apply [`slack/app-manifest.json`](../slack/app-manifest.json) to the **same Slack
 app** once. This registers `/pi-model`, `/pi-effort`, `/pi-new`, `/pi-status`,
 `/pi-usage`, `/pi-flags`, `/pi-update`, `/pi-stop`, `/pi-switch`, `/pi-kill`,
-and `/pi-help`, and updates the older switch descriptions.
+`/pi-run`, and `/pi-help`, and updates the older switch descriptions.
 
 No OAuth scopes, event subscriptions, bot token, app token, second manifest,
 second daemon, or second app are required. Existing channels are not renamed.
@@ -45,6 +45,24 @@ Claude. To involve Pi, name the target explicitly. `/pi-switch` always requires
 
 Pi flags, model, thinking level, and native session ID stay on the Pi leg and
 resume with it. No provider settings are translated during handoff.
+
+## Managed runs in RC.2
+
+`/pi-run` is a new slash command, so an app installed from RC.1 needs the same
+manifest applied again. RC.2's final manifest also advertises its routing
+controls; reapply it if the earlier RC.2 manifest was installed. It adds no
+OAuth scope or token. Ordinary owner Pi messages now use session-persistent
+`auto` routing by default: a separate read-only, tool-free classification call
+keeps simple work native and promotes complex work. Use `/pi-run mode native`
+to preserve pre-RC.2 one-turn behavior, `/pi-run mode always` to promote every
+owner prompt, or `/pi-run direct <prompt>` for a one-time bypass. Collaborator
+prompts remain native. `/pi-run <goal>` and `/pi-run plan <goal>` force managed
+or plan-only behavior explicitly.
+
+Routing policy/pending decisions and managed goal/plan/counter state are stored as bounded custom entries in Pi's
+native session and resumes with that Pi leg. It is not translated during a
+provider switch. Pause an active run before switching providers. See
+[Managed Pi runs](pi-managed-runs.md) for controls, budgets, and limitations.
 
 ## Safety choices
 
@@ -69,7 +87,8 @@ Follow [`release-checklist.md`](release-checklist.md). At minimum:
 4. Roll exactly one daemon in an idle maintenance window.
 5. Canary local `sab-pi`, Slack `/pi-new`, inbound text, a supported image,
    final mirroring, working counters, model/thinking changes, interrupt, usage,
-   artifact return, terminal-close resume, and `--safe` approval.
+   artifact return, terminal-close resume, `--safe` approval, and managed-run
+   plan/approve/auto/pause/resume/review flows.
 6. Canary Claude→Pi→Claude and Codex→Pi→Codex, then a three-way lineage, while
    confirming only one process and channel leg are active.
 7. Force target startup failure and daemon restart during validation to prove

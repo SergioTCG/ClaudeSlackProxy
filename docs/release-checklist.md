@@ -26,6 +26,8 @@
 - [ ] Shellcheck passes at warning severity.
 - [ ] The installed Pi version loads `pi/sab-extension.ts` and lists models in
       offline mode without changing Pi's global configuration.
+- [ ] `node scripts/smoke-pi-managed.mjs` completes against a disposable Git
+      fixture and mock loopback bridge without registering a child Slack leg.
 - [ ] Installer help and provider selection pass on a clean shell.
 - [ ] CI passes on the release commit.
 
@@ -63,6 +65,20 @@
       on a text-only model; non-image attachments remain readable by local path.
 - [ ] Pi `--safe` approves and denies tool calls from Slack and fails closed when
       the relay is interrupted; project-resource trust remains a separate prompt.
+- [ ] `/pi-run` auto and plan/approve modes publish plans, show live
+      phase/step/role/counters, survive pause/resume and terminal resume, enforce
+      each budget, report failures visibly, run independent review, and mirror
+      exactly one final response.
+- [ ] Ordinary owner Pi prompts classify under the default `auto` policy: a
+      simple prompt stays native and a complex write task promotes exactly
+      once. `always`, `native`, and `direct` work and persist as documented;
+      collaborators remain native.
+- [ ] Adaptive classification receives no upload grant or attachment bytes,
+      uses no tools/project resources, fails toward managed execution, reports
+      promotion/cancellation visibly, and resumes one pending route after close.
+- [ ] Managed planner/scout/reviewer children make no writes and never create a
+      Slack channel. `--safe` rejects worker children while the parent remains
+      behind Slack approval; cancel terminates an active child promptly.
 - [ ] Claude → Codex and Codex → the original Claude leg preserve one channel,
       provider-native IDs/settings, queued-message order, and topic metadata.
 - [ ] Claude ↔ Pi, Codex ↔ Pi, and a three-leg round trip preserve one active

@@ -65,6 +65,16 @@ generated MCP configuration. Do not print secrets during diagnostics.
   decisions use the explicitly loaded `pi/sab-extension.ts`. Do not install it
   globally or parse Pi session files. Pi's native project trust remains a
   separate decision from SAB safe-mode tool approval.
+- Pi owner prompts use native-session-persistent adaptive routing by default;
+  collaborators remain native. The read-only classifier must receive visible
+  prompt text only—never artifact grants or attachment bytes—and must fail
+  toward managed execution. Explicit `/pi-run` goals remain force-managed;
+  `direct` and `native` remain deliberate bypasses.
+- Managed Pi runs persist only bounded route/goal/plan/counter state in the
+  native session. Child Pi processes must not inherit bridge identity,
+  Slack/upload capabilities, extensions, skills, session state, or project
+  approval. Keep planning, scouting, and independent review read-only; never
+  bypass the parent safe-mode approval gate with a child writer.
 - Generated-file delivery is provider-neutral. The daemon, not the agent,
   chooses the Slack destination from a short-lived grant tied to an accepted
   Slack message and its live session.

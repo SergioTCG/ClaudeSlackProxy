@@ -91,11 +91,29 @@ export function normalizePiUsage(usage, contextUsage = null) {
   }
 }
 
-export function formatPiWorkingStatus({ startedAt, now = Date.now(), usage }) {
+export function formatPiWorkingStatus({ startedAt, now = Date.now(), usage, managed = null, routing = null }) {
   const parts = [formatElapsed(startedAt, now)]
-  if (usage?.totalTokens > 0) parts.push(`${formatTokens(usage.totalTokens)} tokens this turn`)
-  if (usage?.outputTokens > 0) parts.push(`↓ ${formatTokens(usage.outputTokens)} out`)
+  const managedTokens = managed
+    ? (Number(managed.counters?.parentTokens) || 0) + (Number(managed.counters?.childTokens) || 0)
+    : 0
+  const managedOutput = managed
+    ? (Number(managed.counters?.parentOutputTokens) || 0) + (Number(managed.counters?.childOutputTokens) || 0)
+    : 0
+  const totalTokens = managedTokens + (Number(usage?.totalTokens) || 0)
+  const outputTokens = managedOutput + (Number(usage?.outputTokens) || 0)
+  if (totalTokens > 0) parts.push(`${formatTokens(totalTokens)} tokens ${managed ? 'managed' : 'this turn'}`)
+  if (outputTokens > 0) parts.push(`↓ ${formatTokens(outputTokens)} out`)
   if (usage?.contextPercent > 0) parts.push(`context ${Math.round(usage.contextPercent)}%`)
+  if (managed?.phase) {
+    const progress = managed.totalSteps > 0
+      ? ` step ${managed.currentStep || managed.totalSteps}/${managed.totalSteps}`
+      : ''
+    const agent = managed.activeAgent ? ` · ${managed.activeAgent}` : ''
+    return `⚙️ Pi managed run — ${managed.phase}${progress}${agent} (${parts.join(' · ')})`
+  }
+  if (routing?.status === 'routing') {
+    return `⚙️ Pi is assessing task complexity… (${parts.join(' · ')})`
+  }
   return `⚙️ Pi is working… (${parts.join(' · ')})`
 }
 

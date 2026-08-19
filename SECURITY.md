@@ -88,6 +88,24 @@ accounts, and the Mac user running the daemon.
   failures deny the call. This safety mode is distinct from Pi `--approve`,
   which trusts project-local settings, extensions, skills, and packages and may
   itself authorize code running with the macOS user's privileges.
+- **Isolated adaptive routing:** ordinary owner prompts default to a no-tools,
+  low-thinking child that receives only visible prompt text. Upload grants,
+  attachment bytes, bridge/tmux identity, extensions, session state, skills,
+  themes, project approval, and bridge/Slack/other-agent environment are
+  withheld. Pi provider credentials may still be required to invoke the
+  selected model.
+  Classifier failure or ambiguity promotes to managed execution; collaborators
+  never trigger it. `/pi-run mode native` disables classification for the
+  session and `/pi-run direct` bypasses it once.
+- **Bounded managed Pi runs:** automatic promotion and `/pi-run` are owner-only;
+  managed runs carry explicit
+  wall-clock, parent-turn, subagent, and review-cycle limits. Planner, scout,
+  and reviewer children receive only read/search tools. Child processes have
+  bridge/tmux/upload identity and Slack/other-agent environment removed. They
+  load no session, extensions, skills, prompt templates, themes, or project
+  approvals. Worker children are disabled
+  under `--safe`, because their writes cannot traverse the parent's interactive
+  Slack approval gate.
 - **Local secrets:** Slack tokens and account credentials stay under
   `~/.config/ccs` with restrictive permissions and are ignored by Git.
 - **Conservative self-update:** the updater fast-forwards only a clean checkout
@@ -96,6 +114,12 @@ accounts, and the Mac user running the daemon.
 
 These measures reduce accidental exposure; they do not sandbox a provider that
 was deliberately launched in dangerous mode.
+
+Managed-run budgets are circuit breakers, not a security boundary. In
+unrestricted mode the parent—and an explicitly selected worker child—still has
+the macOS user's filesystem, process, network, and credential access. A long
+goal can consume substantial local inference time. Pause or cancel it from
+Slack when its scope or progress is no longer appropriate.
 
 ## Safer operating choices
 

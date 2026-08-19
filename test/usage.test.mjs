@@ -83,6 +83,26 @@ test('Pi working status includes elapsed time and live token counts', () => {
   }), '⚙️ Pi is working… (1m 05s · 1.6k tokens this turn · ↓ 300 out · context 3%)')
 })
 
+test('Pi working status includes managed phase and plan progress', () => {
+  assert.equal(formatPiWorkingStatus({
+    startedAt: 0, now: 65_000,
+    usage: { totalTokens: 1_575, outputTokens: 300, contextPercent: 3.05 },
+    managed: {
+      phase: 'executing', currentStep: 3, totalSteps: 8, completedSteps: 2, activeAgent: 'worker',
+      counters: { parentTokens: 1_000, parentOutputTokens: 200, childTokens: 500, childOutputTokens: 100 },
+    },
+  }), '⚙️ Pi managed run — executing step 3/8 · worker (1m 05s · 3.1k tokens managed · ↓ 600 out · context 3%)')
+})
+
+test('Pi adaptive routing has a distinct live status', () => {
+  const text = formatPiWorkingStatus({
+    startedAt: 1_000, now: 6_000, usage: null,
+    routing: { status: 'routing', startedAt: 1_000 },
+  })
+  assert.match(text, /assessing task complexity/i)
+  assert.match(text, /5s/)
+})
+
 test('Pi usage ledger can filter by session, project, day, and model', () => {
   const rows = [
     { at: Date.parse('2026-08-18T10:00:00Z'), sessionId: 'a', cwd: '/repo', model: 'local/a', totalTokens: 100 },
