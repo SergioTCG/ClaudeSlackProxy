@@ -26,22 +26,24 @@ test('Slack command definitions satisfy manifest field constraints', () => {
 
 test('Slack manifest has provider-neutral 1.0 metadata', () => {
   assert.equal(manifest.display_information.name, 'Slack Agent Bridge')
-  assert.match(manifest.display_information.description, /Claude Code and Codex/)
+  assert.match(manifest.display_information.description, /Claude Code, Codex, and Pi/)
   assert.equal(manifest.features.bot_user.display_name, 'Clavdivs')
 })
 
-test('provider-scoped commands have parallel Claude and Codex namespaces', () => {
+test('provider-scoped commands have parallel Claude, Codex, and Pi namespaces', () => {
   const scoped = ['new', 'model', 'effort', 'status', 'usage', 'flags', 'update', 'stop', 'switch', 'kill', 'help']
   for (const name of scoped) {
     assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
     assert.ok(names.includes(`/codex-${name}`), `missing /codex-${name}`)
+    assert.ok(names.includes(`/pi-${name}`), `missing /pi-${name}`)
   }
 })
 
-test('bridge-wide and Claude-only commands are not duplicated under Codex', () => {
+test('bridge-wide and Claude-only commands are not duplicated under Codex or Pi', () => {
   for (const name of ['claim', 'health', 'cleanup', 'account']) {
     assert.ok(names.includes(`/cc-${name}`), `missing /cc-${name}`)
     assert.ok(!names.includes(`/codex-${name}`), `unexpected /codex-${name}`)
+    assert.ok(!names.includes(`/pi-${name}`), `unexpected /pi-${name}`)
   }
   const ccNew = commands.find(command => command.command === '/cc-new')
   assert.doesNotMatch(ccNew.usage_hint, /--codex/)

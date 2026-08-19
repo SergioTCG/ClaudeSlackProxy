@@ -1,7 +1,7 @@
 #!/bin/bash
 # Slack Agent Bridge installer (macOS). Idempotent and upgrade-safe.
 #   One-liner: curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash
-#   Providers: ./install.sh --provider claude|codex|both
+#   Providers: ./install.sh --provider claude|codex|pi|both|all
 set -euo pipefail
 
 REPO_URL="https://github.com/SergioTCG/SlackAgentBridge.git"
@@ -10,9 +10,10 @@ RELOAD_DAEMON=1
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [--provider claude|codex|both] [--no-daemon-reload]
+Usage: ./install.sh [--provider claude|codex|pi|both|all] [--no-daemon-reload]
 
-  --provider             Install one CLI integration or both (default: claude).
+  --provider             Install one CLI integration, Claude+Codex (`both`),
+                         or every provider (`all`; default: claude).
   --no-daemon-reload     Stage files and hooks without touching the live daemon.
 EOF
 }
@@ -28,8 +29,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$INSTALL_PROVIDER" in
-  claude|codex|both) ;;
-  *) printf 'Unsupported provider: %s (use claude, codex, or both)\n' "$INSTALL_PROVIDER" >&2; exit 2 ;;
+  claude|codex|pi|both|all) ;;
+  *) printf 'Unsupported provider: %s (use claude, codex, pi, both, or all)\n' "$INSTALL_PROVIDER" >&2; exit 2 ;;
 esac
 
 BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd)"
@@ -70,8 +71,9 @@ CODEX_HOOKS="$CODEX_DIR/hooks.json"
 LOG="$BRIDGE/daemon.log"
 
 say() { printf '%s\n' "$*"; }
-wants_claude() { [ "$INSTALL_PROVIDER" = claude ] || [ "$INSTALL_PROVIDER" = both ]; }
-wants_codex() { [ "$INSTALL_PROVIDER" = codex ] || [ "$INSTALL_PROVIDER" = both ]; }
+wants_claude() { [ "$INSTALL_PROVIDER" = claude ] || [ "$INSTALL_PROVIDER" = both ] || [ "$INSTALL_PROVIDER" = all ]; }
+wants_codex() { [ "$INSTALL_PROVIDER" = codex ] || [ "$INSTALL_PROVIDER" = both ] || [ "$INSTALL_PROVIDER" = all ]; }
+wants_pi() { [ "$INSTALL_PROVIDER" = pi ] || [ "$INSTALL_PROVIDER" = all ]; }
 
 say "Installing Slack Agent Bridge ($INSTALL_PROVIDER) from $BRIDGE"
 
@@ -95,6 +97,9 @@ if wants_claude; then
 fi
 if wants_codex; then
   if command -v codex >/dev/null 2>&1; then say "  ✓ codex"; else say "  ✗ missing: codex"; missing=1; fi
+fi
+if wants_pi; then
+  if command -v pi >/dev/null 2>&1; then say "  ✓ pi"; else say "  ✗ missing: pi"; missing=1; fi
 fi
 [ -d /Applications/Ghostty.app ] || say "  ! Ghostty not found — remote spawn/resume needs it (https://ghostty.org)"
 if [ "$missing" = 1 ]; then say "Install the missing prerequisites and re-run."; exit 1; fi
@@ -124,7 +129,11 @@ if wants_codex; then
   ln -sf "$BRIDGE/bin/ccs-codex" "$BIN_DIR/ccs-codex"
   say "  linked $BIN_DIR/sab-codex (with ccs-codex compatibility alias)"
 fi
-chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex "$BRIDGE"/bin/sab-upload \
+if wants_pi; then
+  ln -sf "$BRIDGE/bin/sab-pi" "$BIN_DIR/sab-pi"
+  say "  linked $BIN_DIR/sab-pi"
+fi
+chmod +x "$BRIDGE"/bin/sab-cc "$BRIDGE"/bin/sab-codex "$BRIDGE"/bin/sab-pi "$BRIDGE"/bin/sab-upload \
   "$BRIDGE"/bin/ccs "$BRIDGE"/bin/ccs-consent "$BRIDGE"/bin/ccs-codex \
   "$BRIDGE"/bin/ccs-window "$BRIDGE"/bin/ccs-spawn "$BRIDGE"/bin/ccs-account \
   "$BRIDGE"/hooks/hook.sh "$BRIDGE"/hooks/codex-hook.sh \
@@ -245,5 +254,9 @@ if wants_claude; then say "   Start Claude locally: sab-cc"; fi
 if wants_codex; then
   say "   Before the first Codex session, run sab-codex and trust the user hook in /hooks."
   say "   Start Codex locally: sab-codex"
+fi
+if wants_pi; then
+  say "   Start Pi locally: sab-pi"
+  say "   Pi's SAB extension is loaded explicitly by sab-pi; no global Pi extension is installed."
 fi
 say "   Logs: tail -f $LOG"

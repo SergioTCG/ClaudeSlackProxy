@@ -5,7 +5,7 @@ contract. This file adds only Claude-specific constraints.
 
 - Preserve the `sab-cc` launcher, MCP Channel server, and
   `--dangerously-load-development-channels server:slack-bridge` launch path.
-- Do not make Codex hook or tmux behavior the implicit model for Claude. Claude
+- Do not make Codex or Pi behavior the implicit model for Claude. Claude
   retains transcript mirroring, status parsing, consent handling, Chrome flags,
   account binding, and `ccusage` support.
 - Generated-file returns use the shared `sab-upload` capability. Do not add a

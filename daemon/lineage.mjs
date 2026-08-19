@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
-import { providerOf } from './providers.mjs'
+import { PROVIDERS, providerOf } from './providers.mjs'
 
-export const LINEAGE_VERSION = 1
+export const LINEAGE_VERSION = 2
 export const TRANSITION_PHASES = Object.freeze([
   'preflight', 'aligning', 'handoff', 'handoff_ready',
   'target_starting', 'target_validating', 'committing', 'rolling_back',
@@ -9,7 +9,19 @@ export const TRANSITION_PHASES = Object.freeze([
 
 const phaseSet = new Set(TRANSITION_PHASES)
 
-export const otherProvider = provider => provider === 'codex' ? 'claude' : 'codex'
+export function defaultSwitchTarget(provider) {
+  if (provider === 'claude') return 'codex'
+  if (provider === 'codex') return 'claude'
+  return null
+}
+
+function upgradeLineage(lineage) {
+  if (!lineage) return lineage
+  if (!lineage.legs) lineage.legs = {}
+  for (const provider of PROVIDERS) if (!(provider in lineage.legs)) lineage.legs[provider] = null
+  lineage.version = LINEAGE_VERSION
+  return lineage
+}
 
 export function lineageFor(state, channel) {
   return state?.lineages?.[channel] || null
@@ -19,7 +31,7 @@ export function lineageFor(state, channel) {
 // loading an old state file must never rewrite every legacy Claude session.
 export function ensureLineage(state, channel, activeSession) {
   if (!state.lineages) state.lineages = {}
-  if (state.lineages[channel]) return state.lineages[channel]
+  if (state.lineages[channel]) return upgradeLineage(state.lineages[channel])
   if (!activeSession?.id || state.channels?.[channel] !== activeSession.id) {
     throw new Error('cannot create a lineage without the channel active session')
   }
@@ -28,7 +40,7 @@ export function ensureLineage(state, channel, activeSession) {
     version: LINEAGE_VERSION,
     generation: 0,
     activeProvider: provider,
-    legs: { claude: null, codex: null, [provider]: activeSession.id },
+    legs: Object.fromEntries(PROVIDERS.map(name => [name, name === provider ? activeSession.id : null])),
     transition: null,
   }
   state.lineages[channel] = lineage
@@ -36,7 +48,7 @@ export function ensureLineage(state, channel, activeSession) {
 }
 
 export function beginTransition(state, channel, activeSession, {
-  now = Date.now(), id = crypto.randomUUID(), targetFlags = [], targetKind = 'new',
+  now = Date.now(), id = crypto.randomUUID(), targetFlags = [], targetKind = 'new', targetProvider = null,
 } = {}) {
   const lineage = ensureLineage(state, channel, activeSession)
   if (lineage.transition) throw new Error('provider switch already in progress')
@@ -44,7 +56,9 @@ export function beginTransition(state, channel, activeSession, {
   if (lineage.activeProvider !== sourceProvider || lineage.legs[sourceProvider] !== activeSession.id) {
     throw new Error('lineage active leg does not match the channel session')
   }
-  const targetProvider = otherProvider(sourceProvider)
+  targetProvider ||= defaultSwitchTarget(sourceProvider)
+  if (!PROVIDERS.includes(targetProvider)) throw new Error('provider switch target is required')
+  if (targetProvider === sourceProvider) throw new Error('target provider is already the active provider')
   const transition = {
     id,
     phase: 'preflight',
@@ -106,7 +120,7 @@ export function transitionForSession(state, sid) {
 
 export function standbyForSession(state, sid) {
   for (const [channel, lineage] of Object.entries(state?.lineages || {})) {
-    for (const provider of ['claude', 'codex']) {
+    for (const provider of PROVIDERS) {
       if (lineage.legs?.[provider] === sid && lineage.activeProvider !== provider) {
         return { channel, lineage, provider }
       }
@@ -167,7 +181,7 @@ export function enqueueTransitionItem(transition, item, limit = 50) {
 }
 
 export function lineageSessionIds(lineage) {
-  return [...new Set([lineage?.legs?.claude, lineage?.legs?.codex].filter(Boolean))]
+  return [...new Set(PROVIDERS.map(provider => lineage?.legs?.[provider]).filter(Boolean))]
 }
 
 export function deleteLineage(state, channel) {

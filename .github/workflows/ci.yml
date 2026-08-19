@@ -42,7 +42,7 @@ jobs:
       - name: Shellcheck scripts
         run: |
           shellcheck -S warning \
-            bin/sab-cc bin/sab-codex \
+            bin/sab-cc bin/sab-codex bin/sab-pi \
             bin/ccs bin/ccs-account bin/ccs-consent bin/ccs-codex \
             bin/ccs-spawn bin/ccs-window \
-            hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh
+            hooks/hook.sh hooks/codex-hook.sh install.sh install-codex.sh install-pi.sh

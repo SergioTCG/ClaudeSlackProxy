@@ -10,21 +10,25 @@ import {
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
+  submitTargetValidation,
 } from '../daemon/providers.mjs'
 
 test('legacy sessions remain Claude without a state migration', () => {
   assert.equal(providerOf({ id: 'old-session' }), 'claude')
   assert.equal(providerOf({ id: 'new-session', provider: 'codex' }), 'codex')
+  assert.equal(providerOf({ id: 'pi-session', provider: 'pi' }), 'pi')
   assert.equal(providerOf({ id: 'unknown', provider: 'other' }), 'claude')
 })
 
 test('Slack command namespace selects exactly one provider', () => {
   assert.deepEqual(parseSlackCommand('/cc-new'), { provider: 'claude', name: 'new' })
   assert.deepEqual(parseSlackCommand('/codex-model'), { provider: 'codex', name: 'model' })
+  assert.deepEqual(parseSlackCommand('/pi-effort'), { provider: 'pi', name: 'effort' })
   assert.equal(parseSlackCommand('/cc_foo'), null)
   assert.equal(parseSlackCommand('/other-new'), null)
   assert.equal(slackCommand('claude', 'status'), '/cc-status')
   assert.equal(slackCommand('codex', 'status'), '/codex-status')
+  assert.equal(slackCommand('pi', 'status'), '/pi-status')
 })
 
 test('Claude flag normalization preserves the existing alias', () => {
@@ -44,10 +48,25 @@ test('Codex flags require an allowlisted switch or inline value', () => {
   assert.equal(normalizeLaunchFlag('codex', '--dangerously-bypass-hook-trust'), null)
 })
 
+test('Pi flags separate project trust and bridge safe mode from unrestricted native tools', () => {
+  assert.equal(normalizeLaunchFlag('pi', '--approve'), '--approve')
+  assert.equal(normalizeLaunchFlag('pi', '--no-approve'), '--no-approve')
+  assert.equal(normalizeLaunchFlag('pi', '--safe'), '--safe')
+  assert.equal(normalizeLaunchFlag('pi', '--model=qwen38-local/qwen3.8-27b'), '--model=qwen38-local/qwen3.8-27b')
+  assert.equal(normalizeLaunchFlag('pi', '--thinking=xhigh'), '--thinking=xhigh')
+  assert.equal(normalizeLaunchFlag('pi', '--thinking=extreme'), null)
+  assert.equal(normalizeLaunchFlag('pi', '--api-key=secret'), null)
+  assert.equal(normalizeLaunchFlag('pi', '--extension=/tmp/evil.ts'), null)
+  assert.equal(normalizeLaunchFlag('pi', '--yolo'), null)
+  assert.equal(normalizeLaunchFlag('pi', '--dsp'), null)
+})
+
 test('provider new-session defaults mirror dangerous-mode aliases', () => {
   assert.deepEqual(defaultNewFlagsFor('claude', {}), ['--dangerously-skip-permissions'])
   assert.deepEqual(defaultNewFlagsFor('codex', {}), [CODEX_DANGEROUS_FLAG])
+  assert.deepEqual(defaultNewFlagsFor('pi', {}), [])
   assert.deepEqual(defaultNewFlagsFor('codex', { CCS_CODEX_NEW_FLAGS: '--search' }), ['--search'])
+  assert.deepEqual(defaultNewFlagsFor('pi', { CCS_PI_NEW_FLAGS: '--safe --offline' }), ['--safe', '--offline'])
 })
 
 test('Codex launch metadata excludes the optional resume prompt', () => {
@@ -85,6 +104,20 @@ test('Codex resume args use the subcommand and preserve provider settings', () =
   ])
 })
 
+test('Pi resume args preserve native settings and resume the exact session id', () => {
+  const session = {
+    id: 'pi-123', provider: 'pi',
+    launchFlags: '--safe --offline --model=old --thinking=low',
+    model: 'qwen38-local/qwen3.8-27b', effort: 'xhigh',
+  }
+  assert.deepEqual(resumeArgsFor(session), [
+    '--safe', '--offline', '--model=qwen38-local/qwen3.8-27b', '--thinking=xhigh',
+    '--session', 'pi-123',
+  ])
+  assert.deepEqual(displayFlagsFor({ ...session, launchFlags: '--safe --session pi-123' }), ['--safe'])
+  assert.deepEqual(resumeArgsFor({ id: 'pi-456', provider: 'pi' }), ['--session', 'pi-456'])
+})
+
 test('provider switching resumes native settings or uses target defaults without translation', () => {
   assert.deepEqual(switchTargetLaunch('codex', null, { CCS_CODEX_NEW_FLAGS: '--search --yolo' }), {
     kind: 'new', args: ['--search', '--yolo'], effectiveFlags: ['--search', '--yolo'],
@@ -96,6 +129,9 @@ test('provider switching resumes native settings or uses target defaults without
     effectiveFlags: ['--chrome', '--dangerously-skip-permissions'],
   })
   assert.throws(() => switchTargetLaunch('codex', claude), /mismatch/)
+  assert.deepEqual(switchTargetLaunch('pi', null, { CCS_PI_NEW_FLAGS: '--safe' }), {
+    kind: 'new', args: ['--safe'], effectiveFlags: ['--safe'],
+  })
 })
 
 test('provider switch buttons have unique Slack action IDs', () => {
@@ -137,6 +173,11 @@ gpt-5.6-sol xhigh · ~/Code/Barrique${'\n'.repeat(40)}`
   assert.equal(targetStartupState('codex', ready), 'ready')
 })
 
+test('Pi target readiness never trusts terminal text in place of its native stream', () => {
+  assert.equal(targetStartupState('pi', '❯ \nshift+tab to cycle\nbypass permissions'), 'starting')
+  assert.equal(targetStartupState('pi', 'Trust project resources?'), 'trust')
+})
+
 test('target validation requires a provider hook session claim', async () => {
   const transition = { target: { provider: 'codex', sid: null } }
   let waits = 0
@@ -148,6 +189,17 @@ test('target validation requires a provider hook session claim', async () => {
   await assert.rejects(() => waitForTargetSessionClaim({ target: { provider: 'codex', sid: null } }, {
     attempts: 2, sleepFn: async () => {},
   }), /Codex target hooks did not register/)
+})
+
+test('target validation preserves provider-specific claim and injection order', async () => {
+  for (const [provider, expected] of [['claude', ['inject', 'claim']], ['codex', ['inject', 'claim']], ['pi', ['claim', 'inject']]]) {
+    const events = []
+    await submitTargetValidation(provider, {
+      waitForClaim: async () => { events.push('claim') },
+      inject: async () => { events.push('inject') },
+    })
+    assert.deepEqual(events, expected, provider)
+  }
 })
 
 test('Codex effort is recovered from launch overrides and root config only', () => {

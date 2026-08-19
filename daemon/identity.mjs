@@ -34,7 +34,7 @@ export async function findControlChannel(fetchPage) {
 export function prunePermissionsOnBoot(permissions = {}, isAlive = () => false) {
   let pruned = 0
   for (const [id, request] of Object.entries(permissions)) {
-    if (request?.provider === 'codex' || !request?.pid || !isAlive(request.pid)) {
+    if (request?.provider === 'codex' || request?.provider === 'pi' || !request?.pid || !isAlive(request.pid)) {
       delete permissions[id]
       pruned++
     }

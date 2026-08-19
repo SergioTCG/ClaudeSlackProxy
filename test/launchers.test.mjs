@@ -28,12 +28,23 @@ for (const [legacy, canonical] of [['ccs', 'sab-cc'], ['ccs-codex', 'sab-codex']
 
 test('daemon-spawned sessions use canonical sab launchers', () => {
   const util = fs.readFileSync(path.join(root, 'daemon', 'util.mjs'), 'utf8')
-  assert.match(util, /provider === 'codex' \? 'sab-codex' : 'sab-cc'/)
+  assert.match(util, /claude: 'sab-cc'/)
+  assert.match(util, /codex: 'sab-codex'/)
+  assert.match(util, /pi: 'sab-pi'/)
+})
+
+test('script-facing spawn accepts Pi as an explicit provider namespace', () => {
+  const launcher = fs.readFileSync(path.join(root, 'bin', 'ccs-spawn'), 'utf8')
+  assert.match(launcher, /"--pi"/)
+  assert.match(launcher, /choose exactly one provider flag/)
 })
 
 test('canonical launchers export an authoritative provider for shared helpers', () => {
   const claude = fs.readFileSync(path.join(root, 'bin', 'sab-cc'), 'utf8')
   const codex = fs.readFileSync(path.join(root, 'bin', 'sab-codex'), 'utf8')
+  const pi = fs.readFileSync(path.join(root, 'bin', 'sab-pi'), 'utf8')
   assert.match(claude, /export CCS_PROVIDER=claude/)
   assert.match(codex, /export CCS_PROVIDER=codex/)
+  assert.match(pi, /export CCS_PROVIDER=pi/)
+  assert.match(pi, /--extension/)
 })

@@ -22,7 +22,7 @@ requireCheck(manifest.features.bot_user.display_name === 'Clavdivs', 'bot person
 requireCheck(installer.includes('SergioTCG/SlackAgentBridge.git'), 'installer clone URL is stale')
 requireCheck(installer.includes('.claudeslackproxy'), 'installer lost legacy checkout detection')
 requireCheck(installer.includes('si.sergej.claudeslackproxy'), 'installer lost the compatible LaunchAgent label')
-requireCheck(readme.includes('`sab-cc`') && readme.includes('`sab-codex`'), 'README does not document canonical launchers')
+requireCheck(readme.includes('`sab-cc`') && readme.includes('`sab-codex`') && readme.includes('`sab-pi`'), 'README does not document canonical launchers')
 requireCheck(readme.includes('`sab-upload`'), 'README does not document the artifact helper')
 requireCheck(readme.includes('`ccs`') && readme.includes('`ccs-codex`'), 'README lost compatibility aliases')
 requireCheck(!fs.existsSync(path.join(root, 'spike/slack-app-manifest.yaml')), 'stale YAML manifest still exists')
@@ -30,7 +30,7 @@ requireCheck(!fs.existsSync(path.join(root, 'spike/slack-app-manifest.yaml')), '
 for (const command of manifest.features.slash_commands.map(item => item.command)) {
   requireCheck(readme.includes(`\`${command}`), `README does not document ${command}`)
 }
-for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/migrating-to-1.1.md', 'docs/migrating-to-1.2.md', 'docs/migrating-to-1.3.md', 'docs/migrating-to-1.4.md', 'docs/release-checklist.md']) {
+for (const file of ['AGENTS.md', 'CLAUDE.md', 'docs/migrating-to-1.0.md', 'docs/migrating-to-1.1.md', 'docs/migrating-to-1.2.md', 'docs/migrating-to-1.3.md', 'docs/migrating-to-1.4.md', 'docs/migrating-to-1.5.md', 'docs/pi-feasibility.md', 'docs/release-checklist.md']) {
   requireCheck(fs.existsSync(path.join(root, file)), `missing ${file}`)
 }
 

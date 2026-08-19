@@ -1,7 +1,7 @@
 {
   "display_information": {
     "name": "Slack Agent Bridge",
-    "description": "Control and hand off local Claude Code and Codex sessions from Slack",
+    "description": "Control and hand off local Claude Code, Codex, and Pi sessions from Slack",
     "background_color": "#1a1a2e"
   },
   "features": {
@@ -22,7 +22,7 @@
       { "command": "/cc-flags", "description": "Show or change Claude Code launch flags", "usage_hint": "[--dsp] [--chrome]", "should_escape": false },
       { "command": "/cc-update", "description": "Update Claude Code and restart/resume this session", "should_escape": false },
       { "command": "/cc-stop", "description": "Interrupt this Claude Code session's running turn", "should_escape": false },
-      { "command": "/cc-switch", "description": "Hand this channel from Claude Code to Codex", "usage_hint": "[new]", "should_escape": false },
+      { "command": "/cc-switch", "description": "Hand this channel from Claude Code to Codex or Pi", "usage_hint": "[codex | pi] [new]", "should_escape": false },
       { "command": "/cc-kill", "description": "End a Claude Code session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
       { "command": "/cc-help", "description": "List Claude Code and bridge-wide commands", "should_escape": false },
 
@@ -34,9 +34,21 @@
       { "command": "/codex-flags", "description": "Show or change Codex launch flags", "usage_hint": "[--search] [--model=value]", "should_escape": false },
       { "command": "/codex-update", "description": "Update Codex and restart/resume this session", "should_escape": false },
       { "command": "/codex-stop", "description": "Interrupt this Codex session's running turn", "should_escape": false },
-      { "command": "/codex-switch", "description": "Hand this channel from Codex to Claude Code", "usage_hint": "[new]", "should_escape": false },
+      { "command": "/codex-switch", "description": "Hand this channel from Codex to Claude Code or Pi", "usage_hint": "[claude | pi] [new]", "should_escape": false },
       { "command": "/codex-kill", "description": "End a Codex session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
-      { "command": "/codex-help", "description": "List Codex commands", "should_escape": false }
+      { "command": "/codex-help", "description": "List Codex commands", "should_escape": false },
+
+      { "command": "/pi-model", "description": "Show or set this Pi session's provider/model", "usage_hint": "[provider/model]", "should_escape": false },
+      { "command": "/pi-effort", "description": "Show or set this Pi session's thinking level", "usage_hint": "[off | minimal | low | medium | high | xhigh | max]", "should_escape": false },
+      { "command": "/pi-new", "description": "Start a Pi session", "usage_hint": "[folder] [Pi flags]", "should_escape": false },
+      { "command": "/pi-status", "description": "Pi session info here, or list Pi sessions", "should_escape": false },
+      { "command": "/pi-usage", "description": "Pi token and context usage", "usage_hint": "[days [n] | models]", "should_escape": false },
+      { "command": "/pi-flags", "description": "Show or change Pi launch and trust flags", "usage_hint": "[--safe] [--approve] [--model=value]", "should_escape": false },
+      { "command": "/pi-update", "description": "Update Pi and restart/resume this session", "should_escape": false },
+      { "command": "/pi-stop", "description": "Interrupt this Pi session's running turn", "should_escape": false },
+      { "command": "/pi-switch", "description": "Hand this channel from Pi to Claude Code or Codex", "usage_hint": "[claude | codex] [new]", "should_escape": false },
+      { "command": "/pi-kill", "description": "End a Pi session (channel stays, resumable)", "usage_hint": "[here | session id]", "should_escape": false },
+      { "command": "/pi-help", "description": "List Pi commands", "should_escape": false }
     ]
   },
   "oauth_config": {

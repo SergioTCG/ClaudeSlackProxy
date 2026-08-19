@@ -7,11 +7,12 @@ import { spawnSync } from 'node:child_process'
 
 const installer = fs.readFileSync(new URL('../install.sh', import.meta.url), 'utf8')
 const codexInstaller = fs.readFileSync(new URL('../install-codex.sh', import.meta.url), 'utf8')
+const piInstaller = fs.readFileSync(new URL('../install-pi.sh', import.meta.url), 'utf8')
 
 test('installer accepts provider-selective setup without side effects for help', () => {
   const run = spawnSync('bash', ['install.sh', '--help'], { encoding: 'utf8' })
   assert.equal(run.status, 0, run.stderr)
-  assert.match(run.stdout, /claude\|codex\|both/)
+  assert.match(run.stdout, /claude\|codex\|pi\|both\|all/)
 })
 
 test('installer preserves installed runtime identities', () => {
@@ -23,12 +24,18 @@ test('installer preserves installed runtime identities', () => {
   assert.match(installer, /Node >= 20 required/)
   assert.match(installer, /bin\/sab-cc/)
   assert.match(installer, /bin\/sab-codex/)
+  assert.match(installer, /bin\/sab-pi/)
   assert.match(installer, /bin\/sab-upload/)
 })
 
 test('legacy Codex activation remains a no-restart operation', () => {
   assert.match(codexInstaller, /--provider codex --no-daemon-reload/)
   assert.doesNotMatch(codexInstaller, /launchctl/)
+})
+
+test('Pi activation remains a no-restart operation', () => {
+  assert.match(piInstaller, /--provider pi --no-daemon-reload/)
+  assert.doesNotMatch(piInstaller, /launchctl/)
 })
 
 test('live daemon reload retries the transient launchd bootstrap race', () => {
@@ -45,7 +52,7 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     const codexHome = path.join(temp, 'codex')
     fs.mkdirSync(fakeBin, { recursive: true })
     fs.mkdirSync(config, { recursive: true })
-    for (const command of ['claude', 'codex', 'tmux']) {
+    for (const command of ['claude', 'codex', 'pi', 'tmux']) {
       const executable = path.join(fakeBin, command)
       fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     }
@@ -67,7 +74,7 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
       CCS_SKIP_GIT_REMOTE_MIGRATION: '1',
     }
     for (let pass = 0; pass < 2; pass++) {
-      const run = spawnSync('bash', ['install.sh', '--provider', 'both', '--no-daemon-reload'], {
+      const run = spawnSync('bash', ['install.sh', '--provider', 'all', '--no-daemon-reload'], {
         encoding: 'utf8', env,
       })
       assert.equal(run.status, 0, run.stderr || run.stdout)
@@ -85,10 +92,13 @@ test('provider hook installation is idempotent and no-restart is isolated', () =
     assert.ok(fs.lstatSync(path.join(linkedBin, 'ccs-codex')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-cc')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-codex')).isSymbolicLink())
+    assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-pi')).isSymbolicLink())
     assert.ok(fs.lstatSync(path.join(linkedBin, 'sab-upload')).isSymbolicLink())
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-cc')), path.resolve('bin/sab-cc'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-codex')), path.resolve('bin/sab-codex'))
+    assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-pi')), path.resolve('bin/sab-pi'))
     assert.equal(fs.readlinkSync(path.join(linkedBin, 'sab-upload')), path.resolve('bin/sab-upload'))
+    assert.equal(fs.existsSync(path.join(temp, '.pi')), false, 'installer must not modify Pi global configuration')
     assert.equal(fs.existsSync(path.join(temp, 'Library/LaunchAgents')), false)
   } finally {
     fs.rmSync(temp, { recursive: true, force: true })

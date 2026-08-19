@@ -4,6 +4,45 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.1] — 2026-08-19
+
+### Added
+- **Native Pi provider.** `sab-pi` runs the ordinary Pi TUI in the shared
+  Ghostty/tmux lifecycle and explicitly loads a bridge-owned native extension;
+  ordinary Pi sessions and global Pi configuration remain untouched.
+- **Complete `/pi-*` namespace.** New, model, thinking effort, flags, update,
+  stop, status, usage, kill, help, and switch commands are provider-isolated.
+  The canonical manifest adds them to the existing Slack app without new OAuth
+  scopes or tokens.
+- **Native Pi transport and telemetry.** The extension carries inbound Slack
+  prompts, model-capable images, lifecycle/final text, live token/context
+  counters, model catalogs, settings changes, and interrupts. Usage is stored as
+  a content-free native event ledger; Pi session JSONL is never parsed.
+- **Optional Pi safe mode.** SAB `--safe` relays every Pi tool call to Slack and
+  fails closed on denial, timeout, identity mismatch, or bridge loss. Pi's
+  separate project-resource trust prompt is also available remotely.
+- **Three-provider handoff.** A channel can retain independent Claude, Codex,
+  and Pi native legs while keeping exactly one active. Explicit target syntax
+  covers every direction, and Pi uses the existing private handoff,
+  instruction-alignment, validation, commit, queue, and rollback protocol.
+- **Staged Pi installation.** `install-pi.sh` adds Pi without restarting the
+  live daemon. Fresh installs accept `--provider pi` or `--provider all`;
+  historical `--provider both` remains Claude+Codex for compatibility.
+
+### Compatibility and safety
+- Missing provider fields still mean Claude, and version-1 lineages receive a
+  null Pi leg only when touched. Existing Claude/Codex command behavior,
+  aliases, state paths, port, LaunchAgent, channels, and switch defaults remain
+  unchanged.
+- Pi project trust and tool approval are documented as distinct controls. Pi's
+  default built-in tools are unrestricted; no misleading `--dsp`/`--yolo`
+  alias is invented.
+- Pi process, tmux, session, stream, permission, artifact, and provisional
+  target claims are cross-checked before state or Slack destinations can be
+  mutated.
+
+[1.5.0-rc.1]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.1
+
 ## [1.4.0-rc.6] — 2026-08-18
 
 ### Fixed

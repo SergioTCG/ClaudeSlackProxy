@@ -1,0 +1,51 @@
+#!/bin/bash
+# sab-pi — Slack Agent Bridge launcher for Pi.
+# Pi remains the normal interactive TUI; the trusted SAB extension provides the
+# message, lifecycle, settings, usage, and optional permission control plane.
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE:0:1}" != "/" ] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+EXTENSION="$ROOT/pi/sab-extension.ts"
+
+command -v tmux >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v pi >/dev/null 2>&1 || PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+
+export CCS_BRIDGE=1
+export CCS_PROVIDER=pi
+export CCS_FLAGS="$*"
+unset CCS_TMUX
+unset CCS_PI_SAFE
+
+PI_ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--safe" ]; then
+    export CCS_PI_SAFE=1
+  else
+    PI_ARGS+=("$arg")
+  fi
+done
+
+if [ -z "$TMUX" ] && [ -z "$CCS_NO_TMUX" ] && command -v tmux >/dev/null 2>&1; then
+  TN="ccs-pi-$$-$RANDOM"
+  q=""
+  for arg in "$@"; do q+="$(printf '%q' "$arg") "; done
+  exec tmux new-session -s "$TN" \
+    "CCS_BRIDGE=1 CCS_PROVIDER=pi CCS_TMUX=$TN $(printf '%q' "$SOURCE") $q"
+fi
+
+if [ -n "$TMUX" ] && [ -z "$CCS_TMUX" ]; then
+  CCS_TMUX="$(tmux display-message -p '#S' 2>/dev/null)"
+  export CCS_TMUX
+fi
+
+if [ ! -f "$EXTENSION" ]; then
+  echo "sab-pi: bridge extension is missing: $EXTENSION" >&2
+  exit 1
+fi
+
+exec pi --extension "$EXTENSION" "${PI_ARGS[@]}"

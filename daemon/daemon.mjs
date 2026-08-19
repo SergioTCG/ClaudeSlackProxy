@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Slack Agent Bridge daemon. Owns the Socket Mode connection and bridge logic.
 import http from 'node:http'
+import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,11 +16,11 @@ import {
 } from './util.mjs'
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
-  CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, acceptHookSettings, allowedFlags,
+  CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
   codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
-  switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
+  submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-binding.mjs'
@@ -29,11 +30,11 @@ import {
   slackArtifactUploadOptions,
 } from './artifacts.mjs'
 import {
-  codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus, formatTokens,
-  usageCost, usageDate, usageRows,
+  codexProjectUsage, codexSessionUsage, codexTokenSnapshot, formatCodexWorkingStatus,
+  formatPiWorkingStatus, formatTokens, normalizePiUsage, piUsageRows, usageCost, usageDate, usageRows,
 } from './usage.mjs'
 import {
-  beginTransition, commitTransition, deleteLineage, enqueueTransitionItem, ensureLineage, lineageFor, otherProvider,
+  beginTransition, commitTransition, defaultSwitchTarget, deleteLineage, enqueueTransitionItem, ensureLineage, lineageFor,
   rebindLineageSession, recoveryDecision, rollbackTransition, setTransitionPhase, transitionForSession, transitionForTarget,
   standbyForSession,
 } from './lineage.mjs'
@@ -75,6 +76,8 @@ process.on('uncaughtException', e => log('uncaughtException:', e?.stack || Strin
 
 // pid → { res } live SSE connections from channel servers
 const streams = new Map()
+const piControlWaiters = new Map() // request id → bounded settings/status command resolver
+const pendingSpawnChannels = new Map() // tmux → Slack channel that requested a not-yet-registered Pi spawn
 // sid → texts injected from Slack, awaiting their UserPromptSubmit echo (dedup)
 const injectedRecently = new Map()
 function rememberInjected(sid, text) {
@@ -108,7 +111,14 @@ async function codexVersion() {
     return out.match(/\b\d+\.\d+\.\d+\b/)?.[0] || out || '?'
   } catch { return '?' }
 }
-const agentVersion = provider => provider === 'codex' ? codexVersion() : claudeVersion()
+function piBin() {
+  const homebrew = '/opt/homebrew/bin/pi'
+  return fs.existsSync(homebrew) ? homebrew : 'pi'
+}
+async function piVersion() {
+  try { return (await execFile(piBin(), ['--version'])).stdout.trim() || '?' } catch { return '?' }
+}
+const agentVersion = provider => provider === 'codex' ? codexVersion() : provider === 'pi' ? piVersion() : claudeVersion()
 let modelCache = { key: null, list: [] }
 async function getModels() {
   const bin = claudeBin()
@@ -496,14 +506,45 @@ function beginCodexTurn(session) {
   startCodexPoller(session)
 }
 
+const piPollers = new Map()
+function startPiPoller(session) {
+  if (piPollers.has(session.id)) return
+  const p = { timer: null, stopped: false, last: '' }
+  const tick = async () => {
+    if (p.stopped || !(session.pid && pidAlive(session.pid))) return
+    const text = formatPiWorkingStatus({
+      startedAt: session.piTurnStartedAt,
+      usage: normalizePiUsage(session.piTurnUsage, session.piContextUsage),
+    })
+    if (text !== p.last) { p.last = text; await setStatus(session, text) }
+  }
+  p.timer = setInterval(() => tick().catch(error => log('Pi status poller error', String(error))), 3000)
+  piPollers.set(session.id, p)
+  tick().catch(error => log('Pi status poller error', String(error)))
+}
+
+function beginPiTurn(session) {
+  stopPoller(session)
+  session.piTurnStartedAt = Date.now()
+  session.piTurnUsage = null
+  saveState(state)
+  startPiPoller(session)
+}
+
 function stopPoller(session) {
   const p = pollers.get(session.id)
   if (p) { p.stopped = true; clearInterval(p.timer); pollers.delete(session.id) }
   const codex = codexPollers.get(session.id)
   if (codex) { codex.stopped = true; clearInterval(codex.timer); codexPollers.delete(session.id) }
+  const pi = piPollers.get(session.id)
+  if (pi) { pi.stopped = true; clearInterval(pi.timer); piPollers.delete(session.id) }
   if (session.codexTurnStartedAt || session.codexUsageBaseline) {
     delete session.codexTurnStartedAt
     delete session.codexUsageBaseline
+    saveState(state)
+  }
+  if (session.piTurnStartedAt) {
+    delete session.piTurnStartedAt
     saveState(state)
   }
 }
@@ -544,6 +585,31 @@ async function finalizeCodexTurn(session, body) {
   saveState(state)
 }
 
+async function finalizePiTurn(session, body) {
+  stopPoller(session)
+  await clearStatus(session)
+  const turnId = body.turn_id || null
+  if (turnId && session.lastMirroredTurn === turnId) return
+  const text = String(body.last_assistant_message || '').trim()
+  if (text && session.channel) await postMd(session.channel, text)
+  recordPiUsage(session, body)
+  if (turnId) session.lastMirroredTurn = turnId
+  saveState(state)
+}
+
+function recordPiUsage(session, body) {
+  const usage = normalizePiUsage(body.usage, body.context_usage)
+  if (usage) {
+    session.piUsage = usage
+    state.piUsage ||= []
+    state.piUsage.push({
+      at: Date.now(), sessionId: session.id, cwd: session.cwd,
+      model: session.model || 'unknown', ...usage,
+    })
+    if (state.piUsage.length > 10000) state.piUsage.splice(0, state.piUsage.length - 10000)
+  }
+}
+
 // Recover live status after a daemon restart. The poller and each status
 // message's ts live only in memory, so a restart mid-turn freezes the status —
 // the daemon can neither update it nor, on Stop, clear it. On boot we re-adopt:
@@ -560,6 +626,17 @@ async function findStatusMessage(channel) {
 async function readoptStatus() {
   for (const s of Object.values(state.sessions)) {
     if (!(s.pid && pidAlive(s.pid) && s.tmux && (await tmuxAlive(s.tmux)))) continue
+    if (providerOf(s) === 'pi') {
+      const ts = await findStatusMessage(s.channel)
+      if (s.piTurnStartedAt) {
+        if (ts) statusTs.set(s.id, ts)
+        startPiPoller(s)
+        log('re-adopted live Pi turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+      } else if (ts) {
+        try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
+      }
+      continue
+    }
     if (providerOf(s) === 'codex') {
       const ts = await findStatusMessage(s.channel)
       if (s.codexTurnStartedAt) {
@@ -652,8 +729,9 @@ async function privateAssistantText(session, body = {}) {
   stopPoller(session)
   await clearStatus(session)
   await clearQuestionForm(session)
-  if (providerOf(session) === 'codex') {
+  if (providerOf(session) === 'codex' || providerOf(session) === 'pi') {
     const turnId = body.turn_id || null
+    if (providerOf(session) === 'pi') recordPiUsage(session, body)
     if (turnId) session.lastMirroredTurn = turnId
     return String(body.last_assistant_message || '').trim()
   }
@@ -729,12 +807,20 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   }
 
   let session = state.sessions[sid] || sessionByPid(pid)
+  if (!session && provider === 'pi' && ev !== 'SessionStart') {
+    log('ignored pre-start Pi event', ev, String(sid).slice(0, 8))
+    return
+  }
   if (session && isSupersededHook(ev, session.pid, pid)) {
     log('ignored hook from superseded pid', ev, pid, 'current', session.pid, String(sid).slice(0, 8))
     return
   }
   if (session && providerOf(session) !== provider) {
     log('rejected cross-provider session collision', String(sid).slice(0, 8), provider)
+    return
+  }
+  if (session && provider === 'pi' && restarting.has(sid) && ev !== 'SessionStart') {
+    log('ignored trailing Pi event during restart', ev, String(sid).slice(0, 8))
     return
   }
   if (!session) {
@@ -759,7 +845,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     let tail = 0
     if (provider === 'claude') { try { tail = fs.statSync(body.transcript_path).size } catch {} }
     session = { id: sid, pid, cwd: body.cwd, tmux, transcript: body.transcript_path, offset: tail, channel: null, statusTs: null }
-    if (provider === 'codex') session.provider = 'codex'
+    if (provider !== 'claude') session.provider = provider
     state.sessions[sid] = session
   }
   // Keep identity fresh (handles /clear: same pid, new sid). This path REBRANDS an
@@ -769,7 +855,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   // to the new id, and require the same terminal.
   if (session.id !== sid) {
     const priorSid = session.id
-    const transcriptMatches = provider === 'codex' || !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
+    const transcriptMatches = provider !== 'claude' || !body.transcript_path || path.basename(body.transcript_path, '.jsonl') === sid
     const sameTerminal = !tmux || !session.tmux || tmux === session.tmux
     if (!transcriptMatches || !sameTerminal) {
       log('rejected identity takeover of', session.id.slice(0, 8), 'by', String(sid).slice(0, 8),
@@ -794,6 +880,20 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
   session.cwd = body.cwd || session.cwd
   session.transcript = body.transcript_path || session.transcript
   if (provider === 'codex' && body.model && (ev === 'SessionStart' || !restarting.has(sid))) session.model = body.model
+  if (provider === 'pi') {
+    if (body.model) session.model = body.model
+    if (body.model_name) session.modelName = body.model_name
+    if (Array.isArray(body.model_input)) session.modelInput = body.model_input
+    if (body.effort) session.effort = body.effort
+    if (body.context_usage) session.piContextUsage = body.context_usage
+    if (body.usage) session.piTurnUsage = body.usage
+    sessionMeta.set(session.id, {
+      ...(sessionMeta.get(session.id) || {}),
+      model: session.modelName || session.model,
+      effort: session.effort,
+      ctxPct: body.context_usage?.percent,
+    })
+  }
   // During a bridge-initiated restart, the old process may emit trailing hooks
   // after the desired settings were persisted. Never let one roll them back;
   // the replacement SessionStart is allowed to confirm its actual launch values.
@@ -813,6 +913,28 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     targetClaim.lineage.legs[provider] = sid
     saveStateNow(state)
   } else saveState(state)
+
+  if (provider === 'pi' && ev === 'ControlResult') {
+    const waiter = piControlWaiters.get(body.request_id)
+    if (waiter) {
+      piControlWaiters.delete(body.request_id)
+      clearTimeout(waiter.timer)
+      waiter.resolve(body)
+    }
+    return
+  }
+  if (provider === 'pi' && ev === 'InputError') {
+    if (session.channel) await post(session.channel, `⚠️ ${String(body.error || 'Pi could not accept that input.').slice(0, 500)}`)
+    return
+  }
+  if (provider === 'pi' && (ev === 'Status' || ev === 'Settings')) {
+    if (session.channel && ev === 'Settings') await updateTopic(session)
+    return
+  }
+  if (provider === 'pi' && ev === 'AgentStart') {
+    if (!targetClaim && !internalTurns.has(session.id) && session.channel) beginPiTurn(session)
+    return
+  }
 
   const standby = !targetClaim && standbyForSession(state, sid)
   if (standby) {
@@ -839,6 +961,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     // A switch target is provisional until its private handoff-readiness turn
     // succeeds. Never create/rebind a Slack channel or mirror startup noise yet.
     if (targetClaim) return
+    pendingSpawnChannels.delete(session.tmux)
     const ch = await ensureChannel(session)
     await updateTopic(session) // existing channels also need fresh SessionStart metadata
     const src = body.source
@@ -852,7 +975,9 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       setTimeout(async () => {
         for (const m of queued) {
           rememberInjected(sid, m)
-          await tmuxPaste(tn, m).catch(e => log('flush paste failed', String(e)))
+          if (provider === 'pi') {
+            if (!injectToSession(session.pid, m)) log('Pi flush stream unavailable', sid.slice(0, 8))
+          } else await tmuxPaste(tn, m).catch(e => log('flush paste failed', String(e)))
           await sleep(500)
         }
       }, 2000)
@@ -872,7 +997,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
       await post(ch, `💬 *You (terminal):*\n${p}`)
     }
     if (provider === 'claude') startPoller(session) // Claude TUI-specific spinner/form relay
-    else beginCodexTurn(session)
+    else if (provider === 'codex') beginCodexTurn(session)
     return
   }
   if (ev === 'PreToolUse') {
@@ -889,6 +1014,7 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
     log('stop hook', session.id.slice(0, 8))
     if (await completePrivateTurn(session, body, targetClaim)) return
     if (provider === 'codex') await finalizeCodexTurn(session, body)
+    else if (provider === 'pi') await finalizePiTurn(session, body)
     else await finalizeTurn(session)
     return
   }
@@ -917,17 +1043,21 @@ async function onHook(body, ppid, tmux, flags, account, requestedProvider = 'cla
 
 // ---- permission relay -------------------------------------------------------
 const codexPermissionWaiters = new Map() // short request id → held hook response
+const piPermissionWaiters = new Map() // short request id → held extension response
 function clearPermissionsForPid(pid, reason = 'session ended') {
   if (!pid) return 0
   let cleared = 0
   for (const [rid, request] of Object.entries(state.perms)) {
     if (Number(request.pid) !== Number(pid)) continue
     delete state.perms[rid]
-    const waiter = codexPermissionWaiters.get(rid)
+    const waiter = codexPermissionWaiters.get(rid) || piPermissionWaiters.get(rid)
     if (waiter) {
       codexPermissionWaiters.delete(rid)
+      piPermissionWaiters.delete(rid)
       clearTimeout(waiter.timer)
-      if (!waiter.res.writableEnded) waiter.res.end('{}')
+      if (!waiter.res.writableEnded) waiter.res.end(waiter.provider === 'pi'
+        ? JSON.stringify(waiter.kind === 'trust' ? { trusted: 'no', remember: false } : { behavior: 'deny', reason })
+        : '{}')
     }
     web.chat.update({
       channel: request.channel, ts: request.ts,
@@ -949,7 +1079,7 @@ function permissionId() {
 }
 async function postPermissionPrompt(channel, p) {
   const preview = String(p.input_preview || '').slice(0, 1200)
-  const agent = p.provider === 'codex' ? 'Codex' : 'Claude'
+  const agent = p.provider === 'codex' ? 'Codex' : p.provider === 'pi' ? 'Pi' : 'Claude'
   const blocks = [
     { type: 'section', text: { type: 'mrkdwn', text: `🔐 *${agent} wants to use \`${escapeText(p.tool_name || 'a tool')}\`*\n${escapeText(String(p.description || '').slice(0, 600))}` } },
   ]
@@ -974,10 +1104,17 @@ async function applyVerdict(rid, behavior, channel, ts) {
   delete state.perms[rid]
   saveState(state)
   const waiter = codexPermissionWaiters.get(rid)
-  if (waiter) {
+  const piWaiter = piPermissionWaiters.get(rid)
+  if (waiter || piWaiter) {
+    const held = waiter || piWaiter
     codexPermissionWaiters.delete(rid)
-    clearTimeout(waiter.timer)
-    if (!waiter.res.writableEnded) waiter.res.end(JSON.stringify(codexPermissionDecision(behavior)))
+    piPermissionWaiters.delete(rid)
+    clearTimeout(held.timer)
+    if (!held.res.writableEnded) held.res.end(JSON.stringify(piWaiter
+      ? held.kind === 'trust'
+        ? { trusted: behavior === 'allow' ? 'yes' : 'no', remember: false }
+        : { behavior }
+      : codexPermissionDecision(behavior)))
   } else {
     const s = streams.get(req.pid)
     if (s) s.res.write(`data: ${JSON.stringify({ type: 'permission_verdict', request_id: rid, behavior })}\n\n`)
@@ -991,13 +1128,32 @@ async function applyVerdict(rid, behavior, channel, ts) {
 }
 
 // ---- injection & resurrection ----------------------------------------------
-function injectToSession(pid, text) {
+function injectToSession(pid, text, files = []) {
   const s = streams.get(pid)
   if (s) {
-    s.res.write(`data: ${JSON.stringify({ type: 'message', text })}\n\n`)
+    const payload = s.provider === 'pi'
+      ? { type: 'prompt', text, ...(files.length ? { files } : {}) }
+      : { type: 'message', text }
+    s.res.write(`data: ${JSON.stringify(payload)}\n\n`)
     return true
   }
   return false
+}
+
+function sendPiControl(session, action, value = null, timeoutMs = 15000) {
+  if (providerOf(session) !== 'pi') return Promise.reject(new Error('not a Pi session'))
+  const stream = streams.get(session.pid)
+  if (!stream || stream.provider !== 'pi') return Promise.reject(new Error('Pi control stream is not connected'))
+  const requestId = crypto.randomUUID()
+  const result = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      piControlWaiters.delete(requestId)
+      reject(new Error(`Pi ${action} command timed out`))
+    }, timeoutMs)
+    piControlWaiters.set(requestId, { resolve, reject, timer })
+  })
+  stream.res.write(`data: ${JSON.stringify({ type: 'control', action, value, requestId })}\n\n`)
+  return result
 }
 
 // Rebuild the launch args for a resume: replay the original flags (so
@@ -1009,6 +1165,7 @@ function resumeArgs(session, initialPrompt = null) {
   return resumeArgsFor(withMeta, {
     defaultClaudeFlags: process.env.CCS_RESUME_FLAGS || '--dangerously-skip-permissions',
     defaultCodexFlags: process.env.CCS_CODEX_RESUME_FLAGS || CODEX_DANGEROUS_FLAG,
+    defaultPiFlags: process.env.CCS_PI_RESUME_FLAGS || '',
     initialPrompt,
   })
 }
@@ -1033,7 +1190,7 @@ async function sendMenuCommand(tmux, cmd) {
 // session.cwd there — which makes --resume look under the wrong slug and fail. Find
 // the dir that actually holds the transcript and re-anchor to it.
 function resumeCwd(session) {
-  if (providerOf(session) === 'codex') return session.cwd
+  if (providerOf(session) !== 'claude') return session.cwd
   if (session.transcript && fs.existsSync(session.transcript)) return session.cwd
   const base = path.join(process.env.HOME, '.claude', 'projects')
   try {
@@ -1068,7 +1225,9 @@ async function resurrect(session, text) {
         fs.mkdirSync(session.cwd, { recursive: true })
         await post(session.channel, `⚠️ Folder \`${session.cwd}\` was gone — recreated it empty and resuming there. The conversation is intact; files from the original folder are not.`)
       } catch (e) {
-        const manual = provider === 'codex' ? `codex resume ${session.id}` : `claude --resume ${session.id}`
+        const manual = provider === 'codex' ? `codex resume ${session.id}`
+          : provider === 'pi' ? `pi --session ${session.id}`
+            : `claude --resume ${session.id}`
         return post(session.channel, `❌ Can't resume — folder \`${session.cwd}\` is gone and couldn't be recreated (${e?.code || e}). The transcript is preserved; resume manually with \`${manual}\` from a valid directory.`)
       }
     }
@@ -1141,7 +1300,11 @@ async function capturePrivateTurn(session, prompt) {
   if (!session?.tmux || !(await tmuxAlive(session.tmux))) throw new Error('source terminal is unavailable')
   const result = waitForPrivateTurn(internalTurns, session.id)
   rememberInjected(session.id, prompt)
-  try { await tmuxPaste(session.tmux, prompt) }
+  try {
+    if (providerOf(session) === 'pi') {
+      if (!injectToSession(session.pid, prompt)) throw new Error('Pi control stream is unavailable')
+    } else await tmuxPaste(session.tmux, prompt)
+  }
   catch (error) {
     const waiter = internalTurns.get(session.id)
     if (waiter) { clearTimeout(waiter.timer); internalTurns.delete(session.id); waiter.reject(error) }
@@ -1155,8 +1318,15 @@ async function captureTargetValidation(transition, prompt) {
   result.catch(() => {}) // cancellation below is handled through this function
   if (transition.target.sid) rememberInjected(transition.target.sid, prompt)
   try {
-    await tmuxPaste(transition.target.tmux, prompt)
-    await waitForTargetSessionClaim(transition, { sleepFn: sleep })
+    await submitTargetValidation(transition.target.provider, {
+      waitForClaim: () => waitForTargetSessionClaim(transition, { sleepFn: sleep }),
+      inject: async () => {
+        if (transition.target.provider !== 'pi') return tmuxPaste(transition.target.tmux, prompt)
+        const target = state.sessions[transition.target.sid]
+        rememberInjected(transition.target.sid, prompt)
+        if (!target || !injectToSession(target.pid, prompt)) throw new Error('Pi target control stream is unavailable')
+      },
+    })
   }
   catch (error) {
     const waiter = targetValidationWaiters.get(transition.id)
@@ -1173,6 +1343,10 @@ async function waitForTargetInputReady(channel, transition, timeoutMs = 5 * 6000
   while (Date.now() - startedAt < timeoutMs) {
     if (!transition?.target?.tmux || !(await tmuxAlive(transition.target.tmux))) {
       throw new Error(`${providerLabel(transition.target.provider)} target terminal closed during startup`)
+    }
+    if (transition.target.provider === 'pi' && transition.target.sid) {
+      const target = state.sessions[transition.target.sid]
+      if (target?.pid && streams.get(target.pid)?.provider === 'pi') return
     }
     const pane = await tmuxCapture(transition.target.tmux)
     const startup = targetStartupState(transition.target.provider, pane)
@@ -1235,10 +1409,14 @@ async function generateInstructionProposal(preflight, provider) {
       ? await runWithInput(codexBin(), ['exec', '--sandbox', 'read-only', '--ephemeral', '--color', 'never', '--skip-git-repo-check', '-'], {
         cwd: neutralCwd, input: prompt, timeout,
       })
-      : await runWithInput(claudeBin(), [
-        '--print', '--permission-mode', 'plan', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit',
-        '--no-session-persistence',
-      ], { cwd: neutralCwd, input: prompt, timeout })
+      : provider === 'pi'
+        ? await runWithInput(piBin(), ['--print', '--no-tools', '--no-session', '--no-context-files'], {
+          cwd: neutralCwd, input: prompt, timeout,
+        })
+        : await runWithInput(claudeBin(), [
+          '--print', '--permission-mode', 'plan', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit',
+          '--no-session-persistence',
+        ], { cwd: neutralCwd, input: prompt, timeout })
     const documents = buildInstructionDocuments(parseInstructionDocuments(output))
     return await buildInstructionPatch(preflight, documents, { tempRoot: CONFIG_DIR })
   } finally {
@@ -1266,7 +1444,7 @@ async function validateInstructionPatchResult(preflight, patch) {
 function switchBlockReason(session, channel, { allowCurrentTransition = false } = {}) {
   if (!allowCurrentTransition && activeTransition(channel)) return 'A provider switch is already in progress in this channel.'
   if (!(session?.pid && pidAlive(session.pid) && session.tmux)) return 'Wake the session first; provider switching requires an active, idle source.'
-  if (pollers.has(session.id) || codexPollers.has(session.id)) return 'Wait for the current agent turn to finish before switching providers.'
+  if (pollers.has(session.id) || codexPollers.has(session.id) || piPollers.has(session.id)) return 'Wait for the current agent turn to finish before switching providers.'
   if (qforms.has(session.id)) return 'Answer or dismiss the open question before switching providers.'
   if (hasPendingPerm(session)) return 'Resolve the open permission request before switching providers.'
   if (internalTurns.has(session.id)) return 'The bridge is already running a private maintenance turn.'
@@ -1296,15 +1474,18 @@ function scheduleSwitchPreviewExpiry(channel, transitionId, expectedUpdatedAt) {
   }, 30 * 60000)
 }
 
-async function beginProviderSwitch(channel, source, { replaceMissing = false } = {}) {
+async function beginProviderSwitch(channel, source, { replaceMissing = false, targetProvider = null } = {}) {
   const blocker = switchBlockReason(source, channel)
   if (blocker) return post(channel, `⚠️ ${blocker}`)
   if (!(await tmuxAlive(source.tmux))) return post(channel, '⚠️ The source terminal is gone. Write a message to resume it, then retry the switch.')
   const lineage = ensureLineage(state, channel, source)
-  const targetProvider = otherProvider(providerOf(source))
+  targetProvider ||= defaultSwitchTarget(providerOf(source))
+  if (!PROVIDERS.includes(targetProvider) || targetProvider === providerOf(source)) {
+    return post(channel, `❌ Choose a different target provider: ${PROVIDERS.filter(name => name !== providerOf(source)).join(' · ')}`)
+  }
   const savedTargetSid = lineage.legs[targetProvider]
   if (savedTargetSid && !state.sessions[savedTargetSid] && !replaceMissing) {
-    return post(channel, `⚠️ The saved ${providerLabel(targetProvider)} leg \`${savedTargetSid.slice(0, 8)}\` is missing from bridge state. Run \`${slackCommand(providerOf(source), 'switch')} new\` to explicitly replace it with a new native leg.`)
+    return post(channel, `⚠️ The saved ${providerLabel(targetProvider)} leg \`${savedTargetSid.slice(0, 8)}\` is missing from bridge state. Run \`${slackCommand(providerOf(source), 'switch')} ${targetProvider} new\` to explicitly replace it with a new native leg.`)
   }
   if (savedTargetSid && !state.sessions[savedTargetSid] && replaceMissing) {
     lineage.legs[targetProvider] = null
@@ -1316,7 +1497,7 @@ async function beginProviderSwitch(channel, source, { replaceMissing = false } =
   }
   const launch = switchTargetLaunch(targetProvider, targetSession, process.env)
   const transition = beginTransition(state, channel, source, {
-    targetFlags: launch.effectiveFlags, targetKind: launch.kind,
+    targetFlags: launch.effectiveFlags, targetKind: launch.kind, targetProvider,
   })
   transition.target.args = launch.args
   const preflight = inspectInstructions(source.cwd)
@@ -1585,12 +1766,13 @@ async function updateAndRestart(session) {
   await sleep(1500) // let the old process fully exit before the binary is swapped
   let note = ''
   try {
-    const bin = provider === 'codex' ? codexBin() : claudeBin()
-    const { stdout, stderr } = await execFile(bin, ['update'], { timeout: 180000 })
+    const bin = provider === 'codex' ? codexBin() : provider === 'pi' ? piBin() : claudeBin()
+    const updateArgs = provider === 'pi' ? ['update', 'self'] : ['update']
+    const { stdout, stderr } = await execFile(bin, updateArgs, { timeout: 180000 })
     note = (stdout + '\n' + stderr).split('\n').map(s => s.trim()).filter(Boolean).pop() || ''
   } catch (e) { note = `error: ${e?.stderr?.trim() || e?.message || e}` }
   if (provider === 'codex') codexModelCache = null
-  else modelCache = { key: null, list: [] }
+  else if (provider === 'claude') modelCache = { key: null, list: [] }
   const after = await agentVersion(provider)
   const ver = before !== after ? `updated \`${before}\` → \`${after}\``
     : /error|fail/i.test(note) ? `⚠️ update check failed — staying on \`${after}\` (${note.slice(0, 120)})`
@@ -1602,6 +1784,15 @@ async function updateAndRestart(session) {
 
 async function handleSlackMessage(channel, text, sender, request) {
   const trimmed = text.trim()
+
+  // The owner may resolve a held permission even while a provider transition
+  // is active (a safe-mode handoff/validation turn can itself need approval).
+  const permissionReply = !sender && PERM_REPLY_RE.exec(trimmed)
+  if (permissionReply) {
+    const ok = await applyVerdict(permissionReply[2].toLowerCase(), /^y/i.test(permissionReply[1]) ? 'allow' : 'deny', channel)
+    if (!ok) await post(channel, '⚠️ No open permission request with that code (it may have been answered or expired).')
+    return
+  }
 
   if (activeTransition(channel)) {
     if (sender) return post(channel, `🔀 Provider switch in progress — <@${sender.id}>’s message was not delivered. Only owner messages are queued during the transition.`)
@@ -1623,25 +1814,17 @@ async function handleSlackMessage(channel, text, sender, request) {
     return injectText(session, withArtifactDelivery(session, `[Slack collaborator ${sender.name}]\n${trimmed}`, request))
   }
 
-  // permission verdict by text ("yes abcde" / "no abcde")
-  const pm = PERM_REPLY_RE.exec(trimmed)
-  if (pm) {
-    const ok = await applyVerdict(pm[2].toLowerCase(), /^y/i.test(pm[1]) ? 'allow' : 'deny', channel)
-    if (!ok) await post(channel, '⚠️ No open permission request with that code (it may have been answered or expired).')
-    return
-  }
-
   // The ./ commands were retired in favour of native namespaced slash commands; nudge.
   const dot = /^\.\/(\w+)/.exec(trimmed)
   if (dot && RETIRED_CMDS.has(dot[1])) {
     const provider = providerOf(sessionByChannel(channel))
-    const prefix = provider === 'codex' ? 'codex-' : 'cc-'
+    const prefix = provider === 'codex' ? 'codex-' : provider === 'pi' ? 'pi-' : 'cc-'
     return post(channel, `\`./\` commands are retired — use \`${slackCommand(provider, dot[1])}\` instead (type \`/${prefix}\` for the list).`)
   }
 
   const session = sessionByChannel(channel)
   if (!session) {
-    if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new` or `/codex-new` to start a session; `/cc-status` and `/codex-status` list each provider.')
+    if (channel === state.control) return post(channel, 'This is the control channel. Use `/cc-new`, `/codex-new`, or `/pi-new` to start a session; the matching `-status` command lists that provider.')
     log('inbound (unmapped channel, ignored)', channel)
     return
   }
@@ -1670,6 +1853,11 @@ const RETIRED_CMDS = new Set(['model', 'effort', 'new', 'status', 'health', 'kil
 // fall back to a channel event, and resurrect the session if it's gone.
 async function injectText(session, text) {
   const alive = session.pid && pidAlive(session.pid)
+  if (alive && providerOf(session) === 'pi' && injectToSession(session.pid, text)) {
+    rememberInjected(session.id, text)
+    log('inject (Pi extension) → session', session.id.slice(0, 8), JSON.stringify(text.slice(0, 50)))
+    return
+  }
   if (alive && session.tmux && (await tmuxAlive(session.tmux))) {
     rememberInjected(session.id, text)
     try {
@@ -1724,8 +1912,9 @@ async function handleAttachments(channel, caption, files, sender, request) {
   if (sender && !(session.pid && pidAlive(session.pid))) {
     return post(channel, `💤 Session is dormant — <@${sender.id}>’s attachment wasn’t delivered. Only the owner can resume it.`)
   }
-  const dir = path.join(process.env.HOME, '.claude', 'ccs-attachments')
-  fs.mkdirSync(dir, { recursive: true })
+  const dir = path.join(CONFIG_DIR, 'attachments')
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try { fs.chmodSync(dir, 0o700) } catch {}
   const saved = []
   for (const f of files) {
     const dl = f.url_private_download || f.url_private
@@ -1738,24 +1927,30 @@ async function handleAttachments(channel, caption, files, sender, request) {
     }
     const safe = String(f.name || f.id).replace(/[^\w.\-]+/g, '_')
     const p = path.join(dir, `${Date.now().toString(36)}-${safe}`)
-    fs.writeFileSync(p, buf)
-    saved.push(p)
+    fs.writeFileSync(p, buf, { mode: 0o600 })
+    saved.push({ path: p, mimetype: f.mimetype || 'application/octet-stream' })
     log('attachment saved', p, buf.length + 'b')
   }
   if (!saved.length) return
-  const list = saved.map(p => `  • ${p}`).join('\n')
+  const list = saved.map(file => `  • ${file.path}`).join('\n')
   const body = caption?.trim()
     ? `${caption.trim()}\n\n(I attached ${saved.length} file(s) from Slack — read them if relevant:\n${list}\n)`
     : `I attached ${saved.length} file(s) from Slack. Please read them:\n${list}`
   const attributed = sender ? `[Slack collaborator ${sender.name}]\n${body}` : body
-  await injectText(session, withArtifactDelivery(session, attributed, request))
+  const delivered = withArtifactDelivery(session, attributed, request)
+  if (providerOf(session) === 'pi' && session.pid && pidAlive(session.pid) &&
+      injectToSession(session.pid, delivered, saved)) {
+    rememberInjected(session.id, delivered)
+    return
+  }
+  await injectText(session, delivered)
 }
 
 const sessionMeta = new Map() // sid → { model, effort } as set via the bridge
 
 // Read the session's model from its transcript init record (first "model" field).
 function readModel(session) {
-  if (providerOf(session) === 'codex') return session.model || null
+  if (providerOf(session) !== 'claude') return session.model || null
   try {
     const fd = fs.openSync(session.transcript, 'r')
     const buf = Buffer.alloc(65536)
@@ -1781,7 +1976,7 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
     if (!listAccounts().includes(account)) return post(channel, `❌ Unknown account \`${account}\`.`)
     extraFlags = extraFlags.filter((_, i) => i !== ai && i !== ai + 1)
   }
-  if (provider === 'codex' && account) return post(channel, '❌ `--account` is only available for Claude Code sessions.')
+  if (provider !== 'claude' && account) return post(channel, '❌ `--account` is only available for Claude Code sessions.')
   if (!extraFlags.length) extraFlags = defaultNewFlags(provider) // provider-specific operator default
   const flags = []
   for (const f of extraFlags) {
@@ -1790,12 +1985,20 @@ async function spawnNew(channel, dir, extraFlags, provider = 'claude') {
     else return post(channel, `❌ Flag not allowed: \`${f}\``)
   }
   const tmuxName = `ccs-new-${Date.now().toString(36)}`
+  if (provider === 'pi') {
+    pendingSpawnChannels.set(tmuxName, channel)
+    const pendingTimer = setTimeout(() => pendingSpawnChannels.delete(tmuxName), 10 * 60000)
+    pendingTimer.unref?.()
+  }
   await post(channel, `🚀 Spawning \`${providerCommand(provider)} ${flags.join(' ')}\` in \`${cwd}\`${account ? ` under \`${account}\`` : ''}…`)
   await reapGhosttyZombies() // windowless-instance pileup breaks new windows
   await ghosttySpawn({ cwd, args: flags, title: `ccs ${path.basename(cwd)}`, tmuxName, autoConsent: provider === 'claude', account, provider })
   let up = false
   for (let i = 0; i < 24 && !up; i++) { await sleep(500); up = await tmuxAlive(tmuxName) }
-  if (!up) await post(channel, `⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try \`${slackCommand(provider, 'new')}\` again.`)
+  if (!up) {
+    pendingSpawnChannels.delete(tmuxName)
+    await post(channel, `⚠️ *The terminal window never initialized* (Ghostty looks wedged). Quit Ghostty on the Mac and try \`${slackCommand(provider, 'new')}\` again.`)
+  }
 }
 
 const codeDir = () => process.env.CCS_CODE_DIR || path.join(process.env.HOME, 'Code')
@@ -1805,11 +2008,12 @@ async function postFolderPicker(channel, provider = 'claude') {
   try { dirs = fs.readdirSync(base, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort() } catch {}
   if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`${slackCommand(provider, 'new')} <folder>\`.`)
   const options = dirs.slice(0, 100).map(d => ({ text: { type: 'plain_text', text: d.slice(0, 75) }, value: d.slice(0, 75) }))
+  const pickerAction = { claude: 'ccnew_folder', codex: 'ccnew_folder_codex', pi: 'ccnew_folder_pi' }[provider]
   await web.chat.postMessage({
     channel, text: 'Pick a project to start a session in',
     blocks: [{
       type: 'section', text: { type: 'mrkdwn', text: `*Start a ${providerLabel(provider)} session* — pick a project in \`${base}\`:` },
-      accessory: { type: 'static_select', action_id: provider === 'codex' ? 'ccnew_folder_codex' : 'ccnew_folder', placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
+      accessory: { type: 'static_select', action_id: pickerAction, placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
     }],
   })
 }
@@ -1992,6 +2196,62 @@ async function usageReport(channel, provider) {
     (provider === 'claude' ? limitFooter() : ''))
 }
 
+function piUsageSummary(rows) {
+  const fields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'cost']
+  return Object.fromEntries(fields.map(field => [field, rows.reduce((sum, row) => sum + Number(row?.[field] || 0), 0)]))
+}
+
+async function piUsageReport(channel, sub, nArg) {
+  const all = Array.isArray(state.piUsage) ? state.piUsage : []
+  const session = channel !== state.control ? sessionByChannel(channel) : null
+  if (sub === 'days' || sub === 'daily') {
+    const n = Math.min(Math.max(parseInt(nArg, 10) || 7, 1), 14)
+    const since = Date.now() - n * 86400000
+    const grouped = new Map()
+    for (const row of piUsageRows(all, { since })) {
+      const day = new Date(row.at).toISOString().slice(0, 10)
+      const bucket = grouped.get(day) || []
+      bucket.push(row); grouped.set(day, bucket)
+    }
+    if (!grouped.size) return post(channel, 'No Pi usage data yet.')
+    const rows = [...grouped].map(([day, entries]) => {
+      const total = piUsageSummary(entries)
+      const models = [...new Set(entries.map(entry => entry.model))].join(', ')
+      return `| ${day} | ${models} | ${fmtTok(total.inputTokens)} | ${fmtTok(total.outputTokens)} | ${fmtTok(total.cacheReadTokens)} | ${fmtTok(total.totalTokens)} | ${fmtUsd(total.cost)} |`
+    })
+    return postMd(channel, `*Pi usage by day*\n| Day | Models | In | Out | Cache R | Total | Cost |\n|---|---|---|---|---|---|---|\n${rows.join('\n')}`)
+  }
+  if (sub === 'models') {
+    const grouped = new Map()
+    for (const row of all) {
+      const bucket = grouped.get(row.model) || []
+      bucket.push(row); grouped.set(row.model, bucket)
+    }
+    if (!grouped.size) return post(channel, 'No Pi usage data yet.')
+    const rows = [...grouped].map(([model, entries]) => {
+      const total = piUsageSummary(entries)
+      return `| ${model} | ${fmtTok(total.inputTokens)} | ${fmtTok(total.outputTokens)} | ${fmtTok(total.cacheReadTokens)} | ${fmtTok(total.totalTokens)} | ${fmtUsd(total.cost)} |`
+    })
+    return postMd(channel, `*Pi usage by model*\n| Model | In | Out | Cache R | Total | Cost |\n|---|---|---|---|---|---|\n${rows.join('\n')}`)
+  }
+  const rows = session ? piUsageRows(all, { cwd: session.cwd }) : all
+  const total = piUsageSummary(rows)
+  if (session) {
+    const currentRows = piUsageRows(all, { sessionId: session.id })
+    const current = piUsageSummary(currentRows)
+    const live = normalizePiUsage(session.piTurnUsage, session.piContextUsage) || session.piUsage
+    const context = live?.contextWindow
+      ? `${fmtTok(live.contextTokens)} / ${fmtTok(live.contextWindow)} (${Math.round(live.contextPercent || 0)}%)`
+      : '—'
+    return postMd(channel, `*Pi usage — ${path.basename(session.cwd)}*\n` +
+      `| Scope | Tokens | Cost |\n|---|---|---|\n` +
+      `| This session (${session.id.slice(0, 8)}) | ${fmtTok(current.totalTokens)} | ${fmtUsd(current.cost)} |\n` +
+      `| Project, all sessions | ${fmtTok(total.totalTokens)} | ${fmtUsd(total.cost)} |\n` +
+      `_Current context: ${context}_`)
+  }
+  return postMd(channel, `*Pi usage — all projects*\n| Turns | Tokens | Cost |\n|---|---|---|\n| ${rows.length} | ${fmtTok(total.totalTokens)} | ${fmtUsd(total.cost)} |`)
+}
+
 // ---- per-session subscriptions ----------------------------------------------
 // A session can run under a named Claude account (see bin/ccs-account), so each
 // person's work bills to their own subscription. The daemon only ever handles
@@ -2065,6 +2325,26 @@ async function setCodexSetting(session, name, value) {
   setTimeout(() => restarting.delete(session.id), 60000)
 }
 
+async function setPiSetting(session, name, value) {
+  const field = name === 'effort' ? 'effort' : 'model'
+  if (!(session.pid && pidAlive(session.pid))) {
+    session[field] = value
+    saveState(state)
+    return post(session.channel, `✅ ${name} → \`${value}\` — it will apply on the next resume.`)
+  }
+  let result
+  try { result = await sendPiControl(session, name, value) }
+  catch (error) { return post(session.channel, `⚠️ Pi could not change ${name}: ${String(error?.message || error).slice(0, 300)}`) }
+  if (!result?.ok) return post(session.channel, `❌ Pi rejected ${name}: ${String(result?.error || 'unknown error').slice(0, 300)}`)
+  if (result.model) session.model = result.model
+  if (result.model_name) session.modelName = result.model_name
+  if (result.effort) session.effort = result.effort
+  sessionMeta.set(session.id, { ...(sessionMeta.get(session.id) || {}), model: session.modelName || session.model, effort: session.effort })
+  saveState(state)
+  await updateTopic(session)
+  return post(session.channel, `✅ ${name} → \`${name === 'model' ? session.model : session.effort}\``)
+}
+
 // Flags a provider-specific new session gets when none are given. Configurable because the
 // right default is a matter of taste and risk appetite (CCS_NEW_FLAGS).
 const defaultNewFlags = (provider = 'claude') => defaultNewFlagsFor(provider)
@@ -2074,6 +2354,19 @@ const CLAUDE_ONLY_COMMANDS = new Set(['account'])
 const BRIDGE_COMMANDS = new Set(['claim', 'health', 'cleanup'])
 
 function commandHelp(provider) {
+  if (provider === 'pi') {
+    return '*Pi commands* — type `/pi-` to autocomplete\n' +
+      '`/pi-new [folder] [--safe] [--approve]` — start a Pi session (native tools are otherwise unrestricted)\n' +
+      '`/pi-model [provider/model]` · `/pi-effort [level]` — show or set Pi model/thinking\n' +
+      '`/pi-update` — update Pi and restart/resume this session\n' +
+      '`/pi-flags [--safe --approve --offline …]` — show or change Pi launch flags\n' +
+      '`/pi-stop` — interrupt the running turn\n' +
+      '`/pi-switch <claude|codex> [new]` — hand this channel to another provider\n' +
+      '`/pi-status` · `/pi-usage [days [n] | models]` — session state and usage\n' +
+      '`/pi-kill [here|<id>]` — end a Pi session (channel stays, resumable)\n' +
+      '*Bridge-wide commands remain under `/cc-`:* `/cc-health` · `/cc-cleanup` · `/cc-claim`\n' +
+      '_Pi has no built-in sandbox; `--approve` controls project resources, not tool access._'
+  }
   if (provider === 'codex') {
     return '*Codex commands* — type `/codex-` to autocomplete\n' +
       '`/codex-new [folder] [--yolo] [--search]` — start a Codex session\n' +
@@ -2081,7 +2374,7 @@ function commandHelp(provider) {
       '`/codex-update` — update Codex CLI and restart/resume this session\n' +
       '`/codex-flags [--yolo --search …]` — show or change Codex launch flags (restarts/resumes)\n' +
       '`/codex-stop` — interrupt the running turn\n' +
-      '`/codex-switch [new]` — hand this channel from Codex to Claude Code\n' +
+      '`/codex-switch [claude|pi] [new]` — hand this channel to another provider\n' +
       '`/codex-status` — session info here, or list Codex sessions from control\n' +
       '`/codex-usage [days [n] | models]` — Codex token and cost usage\n' +
       '`/codex-kill [here|<id>]` — end a Codex session (channel stays, resumable)\n' +
@@ -2095,21 +2388,21 @@ function commandHelp(provider) {
     '`/cc-account [name]` — choose the Claude subscription for this session\n' +
     '`/cc-flags [--dsp --chrome …]` — show or change Claude launch flags (restarts/resumes)\n' +
     '`/cc-stop` — interrupt the running turn\n' +
-    '`/cc-switch [new]` — hand this channel from Claude Code to Codex\n' +
+    '`/cc-switch [codex|pi] [new]` — hand this channel to another provider\n' +
     '`/cc-status` — session info here, or list Claude sessions from control\n' +
     '`/cc-usage [days [n] | models | limits]` — Claude usage and plan limits\n' +
     '`/cc-kill [here|<id>]` — end a Claude session (channel stays, resumable)\n' +
     '`/cc-health` — bridge status · `/cc-cleanup` — archive dormant channels'
 }
 
-// Provider namespaces are explicit at ingress: /cc-* is Claude and
-// /codex-* is Codex. The implementation remains shared below.
+// Provider namespaces are explicit at ingress: /cc-* is Claude, /codex-* is
+// Codex, and /pi-* is Pi. The implementation remains shared below.
 async function dispatch(name, rest, channel, commandProvider = 'claude') {
   const cmd = commandName => slackCommand(commandProvider, commandName)
   if (name === 'help') {
     return post(channel, commandHelp(commandProvider))
   }
-  if (commandProvider === 'codex' && (CLAUDE_ONLY_COMMANDS.has(name) || BRIDGE_COMMANDS.has(name))) {
+  if (commandProvider !== 'claude' && (CLAUDE_ONLY_COMMANDS.has(name) || BRIDGE_COMMANDS.has(name))) {
     return post(channel, `\`${cmd(name)}\` is not registered. ${BRIDGE_COMMANDS.has(name) ? `Use the bridge-wide \`/cc-${name}\`.` : 'This command is Claude-only.'}`)
   }
   const channelSession = channel !== state.control ? sessionByChannel(channel) : null
@@ -2123,10 +2416,19 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
   }
   if (name === 'switch') {
     if (!channelSession) return post(channel, `Use \`${cmd('switch')}\` in an active ${providerLabel(commandProvider)} session channel.`)
-    if (rest.length && !(rest.length === 1 && rest[0].toLowerCase() === 'new')) {
-      return post(channel, `Usage: \`${cmd('switch')}\` (or \`${cmd('switch')} new\` only when explicitly replacing a missing native target leg).`)
+    const words = rest.map(word => word.toLowerCase())
+    const replaceMissing = words.includes('new')
+    const requested = words.find(word => PROVIDERS.includes(word)) || null
+    const legacyTarget = defaultSwitchTarget(commandProvider)
+    const targetProvider = requested || legacyTarget
+    const valid = words.every(word => word === 'new' || PROVIDERS.includes(word)) &&
+      words.filter(word => PROVIDERS.includes(word)).length <= 1
+    if (!valid || !targetProvider || targetProvider === commandProvider) {
+      const choices = PROVIDERS.filter(provider => provider !== commandProvider).join('|')
+      return post(channel, `Usage: \`${cmd('switch')} <${choices}> [new]\`` +
+        (legacyTarget ? ` (without a target, defaults to ${providerLabel(legacyTarget)})` : ''))
     }
-    return beginProviderSwitch(channel, channelSession, { replaceMissing: rest[0]?.toLowerCase() === 'new' })
+    return beginProviderSwitch(channel, channelSession, { replaceMissing, targetProvider })
   }
   if (name === 'status') {
     const session = channelSession
@@ -2137,8 +2439,10 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
       const meta = sessionMeta.get(session.id) || {}
       const changes = gs ? `${gs.split('\n').length} file(s) changed` : '✓ clean'
       const lineage = lineageFor(state, channel)
-      const standbyProvider = lineage ? otherProvider(lineage.activeProvider) : null
-      const standby = standbyProvider && lineage.legs[standbyProvider] ? state.sessions[lineage.legs[standbyProvider]] : null
+      const standbys = lineage ? PROVIDERS
+        .filter(provider => provider !== lineage.activeProvider && lineage.legs?.[provider])
+        .map(provider => ({ provider, session: state.sessions[lineage.legs[provider]] }))
+        .filter(item => item.session) : []
       // Table cells are raw text (no markdown), so no backticks here.
       await postMd(channel,
         `*Session ${session.id.slice(0, 8)}* — ${alive ? '🟢 active' : '💤 dormant'}\n` +
@@ -2148,7 +2452,7 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
         `| Branch | ${branch || '—'}${worktree ? ` · wt:${worktree}` : ''} |\n` +
         `| Model | ${meta.model || readModel(session) || '—'} |\n` +
         `| Effort | ${meta.effort || session.effort || '—'} |\n` +
-        (standby ? `| Standby leg | ${providerLabel(standbyProvider)} · ${standby.id.slice(0, 8)} · ${standby.pid && pidAlive(standby.pid) ? '⚠️ unexpectedly live' : 'preserved'} |\n` : '') +
+        standbys.map(({ provider, session: standby }) => `| Standby leg | ${providerLabel(provider)} · ${standby.id.slice(0, 8)} · ${standby.pid && pidAlive(standby.pid) ? '⚠️ unexpectedly live' : 'preserved'} |\n`).join('') +
         (lineage?.transition ? `| Transition | ${lineage.transition.phase} → ${providerLabel(lineage.transition.target.provider)} |\n` : '') +
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
@@ -2166,15 +2470,16 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const sess = Object.values(state.sessions)
     const active = sess.filter(s => s.pid && pidAlive(s.pid)).length
     const codex = sess.filter(s => providerOf(s) === 'codex').length
-    const claude = sess.length - codex
+    const pi = sess.filter(s => providerOf(s) === 'pi').length
+    const claude = sess.length - codex - pi
     const up = Math.round((Date.now() - BOOT_TS) / 1000)
     const hms = up < 3600 ? `${Math.round(up / 60)}m` : `${(up / 3600).toFixed(1)}h`
     return postMd(channel,
       `| Bridge health | |\n|---|---|\n` +
       `| Uptime | ${hms} |\n` +
       `| Sessions | ${active} active, ${sess.length - active} dormant |\n` +
-      `| Providers | ${claude} Claude, ${codex} Codex |\n` +
-      `| Channel servers attached | ${streams.size} |\n` +
+      `| Providers | ${claude} Claude, ${codex} Codex, ${pi} Pi |\n` +
+      `| Agent streams attached | ${streams.size} |\n` +
       `| Open permission prompts | ${Object.keys(state.perms).length} |`)
   }
   if (name === 'kill') {
@@ -2212,6 +2517,20 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     if (!rest.length) {
       if (name === 'model') {
         const cur = meta.model || readModel(session) || 'unknown'
+        if (provider === 'pi') {
+          if (session.pid && pidAlive(session.pid)) {
+            try {
+              const result = await sendPiControl(session, 'models')
+              if (result?.ok && result.models?.length) {
+                const rows = result.models.map(model =>
+                  `| \`${model.id}\` | ${model.name || model.id} | ${model.reasoning ? 'yes' : 'no'} | ${(model.input || []).join(', ')} |`).join('\n')
+                return postMd(channel, `*Model* — current: \`${cur}\`\nSet with \`${cmd('model')} <provider/model>\`:\n` +
+                  `| Model id | Name | Thinking | Input |\n|---|---|---|---|\n${rows}`)
+              }
+            } catch (error) { log('Pi model catalog unavailable', String(error)) }
+          }
+          return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <provider/model>\`.`)
+        }
         if (provider === 'codex') {
           const models = await getCodexModels()
           if (models.length) {
@@ -2229,7 +2548,9 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
         }
         return post(channel, `*model*: \`${cur}\`\nSet with \`${cmd('model')} <value>\`  (sonnet · opus · haiku · fable)`)
       }
-      const efforts = provider === 'codex' ? CODEX_EFFORTS.join(' · ') : 'low · medium · high · max'
+      const efforts = provider === 'codex' ? CODEX_EFFORTS.join(' · ')
+        : provider === 'pi' ? PI_EFFORTS.join(' · ')
+          : 'low · medium · high · max'
       return post(channel, `*effort*: \`${meta.effort || session.effort || 'unknown'}\`\nSet with \`${cmd('effort')} <value>\`  (${efforts})`)
     }
     if (provider === 'codex') {
@@ -2238,6 +2559,13 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
         return post(channel, `❌ Unsupported Codex effort \`${val}\`. Use: ${CODEX_EFFORTS.join(' · ')}`)
       }
       return setCodexSetting(session, name, val)
+    }
+    if (provider === 'pi') {
+      const val = name === 'effort' ? rest.join(' ').toLowerCase() : rest.join(' ')
+      if (name === 'effort' && !PI_EFFORTS.includes(val)) {
+        return post(channel, `❌ Unsupported Pi thinking level \`${val}\`. Use: ${PI_EFFORTS.join(' · ')}`)
+      }
+      return setPiSetting(session, name, val)
     }
     if (!(session.pid && pidAlive(session.pid))) return post(channel, 'Session not active — send a message first to wake it.')
     let val = rest.join(' ')
@@ -2261,11 +2589,15 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
   if (name === 'stop') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
-    await tmuxInterrupt(session.tmux, providerOf(session))
+    if (providerOf(session) === 'pi') {
+      try { await sendPiControl(session, 'abort') }
+      catch (error) { return post(channel, `⚠️ Pi interrupt failed: ${String(error?.message || error).slice(0, 200)}`) }
+    } else await tmuxInterrupt(session.tmux, providerOf(session))
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'usage') {
     const sub = (rest[0] || '').toLowerCase()
+    if (commandProvider === 'pi') return piUsageReport(channel, sub, rest[1])
     if (sub === 'limits') {
       if (commandProvider === 'codex') return post(channel, 'Codex plan-limit windows are not exposed by ccusage; token and cost reports are available here.')
       return usageLimits(channel) // instant — no transcript scan
@@ -2282,7 +2614,7 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const available = listAccounts()
     const known = available.length ? available.map(a => `\`${a}\``).join(' · ') : '_none yet — add one on the Mac with_ `ccs-account add <name>`'
     if (!session) return post(channel, `*Subscriptions available:* ${known}\nRun \`/cc-account <name>\` in a session channel to bind that session to an account.`)
-    if (providerOf(session) === 'codex') return post(channel, '`/cc-account` is Claude-only; Codex uses the machine’s current Codex login.')
+    if (providerOf(session) !== 'claude') return post(channel, '`/cc-account` is Claude-only; this provider uses its native machine configuration.')
     const cur = session.account ? `\`${session.account}\`` : "this machine's own Claude login (default)"
     if (!rest.length) {
       return post(channel, `*Subscription for this session:* ${cur}\n*Available:* ${known}\nSwitch with \`/cc-account <name>\` (or \`/cc-account default\`). The session restarts and resumes — the conversation is kept.`)
@@ -2303,7 +2635,9 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     const session = sessionByChannel(channel)
     if (!session) return post(channel, `Use \`${cmd('flags')}\` in a ${providerLabel(commandProvider)} session channel.`)
     const provider = providerOf(session)
-    const alias = provider === 'claude' ? ' (`--dsp` works too)' : ' (`--yolo` works too)'
+    const alias = provider === 'claude' ? ' (`--dsp` works too)'
+      : provider === 'codex' ? ' (`--yolo` works too)'
+        : ' (Pi tools are unrestricted by default; `--approve` only controls project resources)'
     const allowed = allowedFlags(provider).map(f => `\`${f}\``).join(' · ') + alias
     if (!rest.length) {
       const cur = displayFlags(session)
@@ -2319,9 +2653,9 @@ async function dispatch(name, rest, channel, commandProvider = 'claude') {
     return setFlags(session, flags)
   }
   if (name === 'new') {
-    const providerFlag = rest.find(arg => arg === '--codex' || arg === '--claude')
+    const providerFlag = rest.find(arg => arg === '--codex' || arg === '--claude' || arg === '--pi')
     if (providerFlag) {
-      const requested = providerFlag === '--codex' ? 'codex' : 'claude'
+      const requested = providerFlag.slice(2)
       return post(channel, `❌ Provider flags are retired. Use \`${slackCommand(requested, 'new')}\`; the command namespace now selects the provider.`)
     }
     if (!rest.length) return postFolderPicker(channel, commandProvider)
@@ -2451,6 +2785,135 @@ http.createServer(async (req, res) => {
     }
     return
   }
+  if (url.pathname === '/pi/event' && req.method === 'POST') {
+    res.setHeader('content-type', 'application/json')
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    try {
+      const event = JSON.parse(raw || '{}')
+      await onHook({
+        ...event,
+        hook_event_name: event.event,
+        transcript_path: event.session_file,
+      }, url.searchParams.get('ppid'), url.searchParams.get('tmux'),
+      req.headers['x-ccs-flags'], null, 'pi')
+      res.end(JSON.stringify({ ok: true }))
+    } catch (error) {
+      log('Pi event error', String(error))
+      res.writeHead(400); res.end(JSON.stringify({ ok: false }))
+    }
+    return
+  }
+  if (url.pathname === '/pi/permission' && req.method === 'POST') {
+    res.setHeader('content-type', 'application/json')
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    try {
+      const request = JSON.parse(raw || '{}')
+      const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'pi')
+      const tmux = String(url.searchParams.get('tmux') || '')
+      const session = state.sessions[request.session_id] || sessionByPid(pid)
+      const transition = transitionForTarget(state, 'pi', tmux)
+      const provisionalChannel = transition?.transition.target.sid === session?.id ? transition.channel : null
+      const channel = session?.channel || provisionalChannel
+      const validClaim = tmux && await validTmuxClaim(pid, tmux)
+      if (!channel || providerOf(session) !== 'pi' || !validClaim ||
+          (session.pid && Number(session.pid) !== Number(pid)) || (session.tmux && session.tmux !== tmux)) {
+        return res.end(JSON.stringify({ behavior: 'deny', reason: 'Pi session identity was not authorized.' }))
+      }
+      const rid = permissionId()
+      let preview = ''
+      try { preview = JSON.stringify(request.tool_input ?? {}, null, 2) } catch { preview = String(request.tool_input || '') }
+      const prompt = {
+        request_id: rid, provider: 'pi', tool_name: request.tool_name || 'tool',
+        description: 'Safe-mode approval requested by Pi.', input_preview: preview,
+      }
+      const ts = await postPermissionPrompt(channel, prompt)
+      state.perms[rid] = { pid, channel, ts, tool: prompt.tool_name, provider: 'pi' }
+      saveState(state)
+      const timer = setTimeout(async () => {
+        const waiter = piPermissionWaiters.get(rid)
+        if (!waiter) return
+        piPermissionWaiters.delete(rid); delete state.perms[rid]; saveState(state)
+        if (!res.writableEnded) res.end(JSON.stringify({ behavior: 'deny', reason: 'Permission request expired.' }))
+        await web.chat.update({ channel, ts, text: `⌛ Expired ${prompt.tool_name}`, blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: `⌛ *Permission request expired* \`${escapeText(prompt.tool_name)}\`` } },
+        ] }).catch(() => {})
+      }, 570000)
+      piPermissionWaiters.set(rid, { res, timer, provider: 'pi', kind: 'tool' })
+      res.on('close', () => {
+        const waiter = piPermissionWaiters.get(rid)
+        if (!waiter || waiter.res !== res || res.writableEnded) return
+        clearTimeout(waiter.timer); piPermissionWaiters.delete(rid); delete state.perms[rid]; saveState(state)
+      })
+    } catch (error) {
+      log('Pi permission error', String(error))
+      if (!res.writableEnded) res.end(JSON.stringify({ behavior: 'deny', reason: 'Permission relay failed.' }))
+    }
+    return
+  }
+  if (url.pathname === '/pi/trust' && req.method === 'POST') {
+    res.setHeader('content-type', 'application/json')
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    try {
+      const request = JSON.parse(raw || '{}')
+      const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'pi')
+      const tmux = String(url.searchParams.get('tmux') || '')
+      if (!tmux || !(await validTmuxClaim(pid, tmux))) return res.end(JSON.stringify({ trusted: 'undecided' }))
+      const candidate = sessionByPid(pid) || Object.values(state.sessions).find(item => item.tmux === tmux)
+      const session = candidate && providerOf(candidate) === 'pi' &&
+        (!candidate.pid || Number(candidate.pid) === Number(pid)) ? candidate : null
+      const transition = transitionForTarget(state, 'pi', tmux)
+      const channel = session?.channel || transition?.channel || pendingSpawnChannels.get(tmux)
+      if (!channel) return res.end(JSON.stringify({ trusted: 'undecided' }))
+      const rid = permissionId()
+      const prompt = {
+        request_id: rid, provider: 'pi', tool_name: 'project resources',
+        description: `Trust Pi project-local settings, extensions, skills, and packages in ${String(request.cwd || '').slice(0, 500)}?`,
+        input_preview: 'AGENTS.md and CLAUDE.md load regardless. Approval may execute project-local Pi extensions with your macOS permissions.',
+      }
+      const ts = await postPermissionPrompt(channel, prompt)
+      state.perms[rid] = { pid, channel, ts, tool: prompt.tool_name, provider: 'pi', kind: 'trust' }
+      saveState(state)
+      const timer = setTimeout(async () => {
+        const waiter = piPermissionWaiters.get(rid)
+        if (!waiter) return
+        piPermissionWaiters.delete(rid); delete state.perms[rid]; saveState(state)
+        if (!res.writableEnded) res.end(JSON.stringify({ trusted: 'undecided' }))
+        await web.chat.update({ channel, ts, text: '⌛ Pi project trust request expired', blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: '⌛ *Pi project trust request expired* — decide locally in Ghostty or retry the launch.' } },
+        ] }).catch(() => {})
+      }, 570000)
+      piPermissionWaiters.set(rid, { res, timer, provider: 'pi', kind: 'trust' })
+      res.on('close', () => {
+        const waiter = piPermissionWaiters.get(rid)
+        if (!waiter || waiter.res !== res || res.writableEnded) return
+        clearTimeout(waiter.timer); piPermissionWaiters.delete(rid); delete state.perms[rid]; saveState(state)
+      })
+    } catch (error) {
+      log('Pi trust relay error', String(error))
+      if (!res.writableEnded) res.end(JSON.stringify({ trusted: 'undecided' }))
+    }
+    return
+  }
+  if (url.pathname === '/pi/stream' && req.method === 'GET') {
+    const pid = await resolveAgentPid(url.searchParams.get('ppid'), 'pi')
+    const tmux = String(url.searchParams.get('tmux') || '')
+    const session = sessionByPid(pid)
+    const target = transitionForTarget(state, 'pi', tmux)
+    if (!tmux || !(await validTmuxClaim(pid, tmux)) ||
+        (!target && (!session || providerOf(session) !== 'pi' || session.tmux !== tmux))) {
+      res.writeHead(403); res.end(); return
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+    res.write(': connected\n\n')
+    streams.set(pid, { res, provider: 'pi' })
+    log('Pi extension stream attached pid', pid)
+    const ka = setInterval(() => { try { res.write(': ka\n\n') } catch {} }, 15000)
+    req.on('close', () => { clearInterval(ka); if (streams.get(pid)?.res === res) streams.delete(pid) })
+    return
+  }
   // Agent-facing artifact delivery. An opaque grant is minted only for an
   // owner/whitelisted Slack message; process ancestry + tmux bind the caller to
   // that same live provider session. The caller supplies paths, never a Slack
@@ -2550,7 +3013,7 @@ http.createServer(async (req, res) => {
     const pid = await resolveClaudePid(ppid)
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
     res.write(': connected\n\n')
-    streams.set(pid, { res })
+    streams.set(pid, { res, provider: 'claude' })
     log('channel attached pid', pid)
     // attach to a session record and flush any queued messages for its sid
     const session = sessionByPid(pid)
@@ -2630,7 +3093,7 @@ sm.on('slash_commands', async ({ body, ack }) => {
       await respondEphemeral(body, '👑 You own this bridge now. Check your private bridge control channel.')
       if (state.control) {
         try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
-        await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for Claude Code or \`/codex-\` for Codex; the matching \`-new\` and \`-help\` commands get you started.`).catch(() => {})
+        await post(state.control, `👑 <@${USER}> claimed this bridge. Type \`/cc-\` for Claude Code, \`/codex-\` for Codex, or \`/pi-\` for Pi; the matching \`-new\` and \`-help\` commands get you started.`).catch(() => {})
       }
       return
     }
@@ -2656,9 +3119,10 @@ sm.on('interactive', async ({ body, ack }) => {
     if (body?.type !== 'block_actions' || body.user?.id !== USER) return
     const action = body.actions?.[0]
     if (!action) return
-    if (action.action_id === 'ccnew_folder' || action.action_id === 'ccnew_folder_codex') {
+    if (action.action_id === 'ccnew_folder' || action.action_id === 'ccnew_folder_codex' || action.action_id === 'ccnew_folder_pi') {
       const folder = action.selected_option?.value
-      const provider = action.action_id === 'ccnew_folder_codex' ? 'codex' : 'claude'
+      const provider = action.action_id === 'ccnew_folder_codex' ? 'codex'
+        : action.action_id === 'ccnew_folder_pi' ? 'pi' : 'claude'
       if (folder) await spawnNew(body.channel?.id, path.join(codeDir(), folder), defaultNewFlags(provider), provider)
       return
     }
@@ -2737,7 +3201,7 @@ async function selfUpdate(trigger) {
   }
   const after = pkgVersion()
   log(`self-update: v${before} → v${after}; restarting when idle`)
-  for (let i = 0; i < 120 && (pollers.size || codexPollers.size); i++) await sleep(5000) // prefer restarting between turns (≤10 min)
+  for (let i = 0; i < 120 && (pollers.size || codexPollers.size || piPollers.size); i++) await sleep(5000) // prefer restarting between turns (≤10 min)
   if (state.control) await post(state.control, `⬆️ *Bridge updated* v${before} → v${after} — restarting the daemon. Sessions keep running.`).catch(() => {})
   setTimeout(() => process.exit(0), 800) // flush the post; launchd (KeepAlive) brings us back on the new code
 }
@@ -2854,7 +3318,7 @@ setInterval(async () => {
       }
       if (USER) { // fresh installs are unclaimed; /cc-claim invites the owner later
         try { await web.conversations.invite({ channel: state.control, users: USER }) } catch {}
-        await post(state.control, '🤖 *Bridge online.* Type `/cc-` for Claude Code or `/codex-` for Codex. Start with `/cc-new` or `/codex-new`; use the matching `-help` command for the list.')
+        await post(state.control, '🤖 *Bridge online.* Type `/cc-` for Claude Code, `/codex-` for Codex, or `/pi-` for Pi. Use the matching `-new` and `-help` commands to get started.')
       }
     } catch (e) {
       if (e?.data?.error === 'name_taken') {

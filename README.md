@@ -1,61 +1,70 @@
 # Slack Agent Bridge
 
-Control local [Claude Code](https://claude.com/claude-code) and
-[Codex CLI](https://developers.openai.com/codex/cli/) sessions from Slack. Each
-terminal session gets a private Slack channel where prompts, responses, tables,
-and attachments flow both ways. Close the terminal, write in Slack later, and
-the bridge opens a new Ghostty window and resumes the same conversation.
+Control local [Claude Code](https://claude.com/claude-code),
+[Codex CLI](https://developers.openai.com/codex/cli/), and
+[Pi](https://github.com/earendil-works/pi) sessions from Slack. Each terminal
+session gets a private Slack channel where prompts, responses, tables, and
+attachments flow both ways. Close the terminal, write in Slack later, and the
+bridge opens a new Ghostty window and resumes the same native conversation.
 
-The two providers deliberately have separate command namespaces: `/cc-*` is
-Claude Code and `/codex-*` is Codex. They share the reliable session, Slack,
-tmux, and Ghostty infrastructure without pretending that provider-specific
-capabilities are identical. A channel can safely hand work from one provider to
-the other while preserving a separate resumable native conversation for each.
+The providers deliberately have separate command namespaces: `/cc-*` is Claude
+Code, `/codex-*` is Codex, and `/pi-*` is Pi. They share the reliable session,
+Slack, tmux, and Ghostty infrastructure without pretending that
+provider-specific capabilities are identical. A channel can safely hand work
+between providers while preserving a separate resumable native conversation
+for each one it has used.
 
 > [!WARNING]
 > **This is remote code execution by design.** Slack-spawned Claude sessions
 > default to `--dangerously-skip-permissions`; Slack-spawned Codex sessions
 > default to `--dangerously-bypass-approvals-and-sandbox` (`--yolo`). Anyone
-> able to act as the bridge owner in Slack can steer processes on this Mac.
+> Pi's built-in tools are unrestricted by default; SAB's optional `--safe`
+> flag adds fail-closed Slack approval per tool call. Anyone able to act as the
+> bridge owner in Slack can steer processes on this Mac.
 > Read [SECURITY.md](SECURITY.md) before installing. This project is not
 > affiliated with Anthropic, OpenAI, or Slack.
 
 > [!NOTE]
 > **macOS only:** the current implementation uses launchd, Ghostty, and `open`.
 > Claude uses the Channels research-preview API; Codex uses lifecycle hooks and
-> tmux. Linux support needs a service and terminal-spawn adapter.
+> tmux; Pi uses an explicitly loaded native extension. Linux support needs a
+> service and terminal-spawn adapter.
 
 ## What is supported
 
-| Capability | Claude Code | Codex CLI |
-|---|---:|---:|
-| Private channel per terminal session | ✓ | ✓ |
-| Slack prompts and file attachments | ✓ | ✓ |
-| Return generated files to Slack | ✓ | ✓ |
-| Mirrored prompts and final responses | ✓ | ✓ |
-| Terminal-close detection and Slack resume | ✓ | ✓ |
-| Model and reasoning-effort controls | ✓ | ✓ |
-| Approve/deny from Slack in permissioned mode | ✓ | ✓ |
-| Default unattended mode | `--dangerously-skip-permissions` | `--yolo` |
-| Live working status with time and token counters | ✓ | ✓ |
-| Token and cost usage via `ccusage` | ✓ | ✓ |
-| Handoff to the other provider in the same Slack channel | ✓ | ✓ |
-| Claude subscription switching | ✓ | — |
-| Chrome integration flag | `--chrome` | No direct counterpart |
-| Live web search flag | Provider-managed | `--search` |
+| Capability | Claude Code | Codex CLI | Pi |
+|---|---:|---:|---:|
+| Private channel per terminal session | ✓ | ✓ | ✓ |
+| Slack prompts and file attachments | ✓ | ✓ | ✓ |
+| Native image input when the model supports it | Path | Path | ✓ |
+| Return generated files to Slack | ✓ | ✓ | ✓ |
+| Mirrored prompts and final responses | ✓ | ✓ | ✓ |
+| Terminal-close detection and Slack resume | ✓ | ✓ | ✓ |
+| Model and reasoning/thinking controls | ✓ | ✓ | ✓ |
+| Approve/deny from Slack in permissioned mode | ✓ | ✓ | `--safe` |
+| Default unattended mode | `--dangerously-skip-permissions` | `--yolo` | unrestricted tools |
+| Live working status with time and token counters | ✓ | ✓ | ✓ |
+| Token and cost usage | `ccusage` | `ccusage` | native event ledger |
+| Handoff among providers in one Slack channel | ✓ | ✓ | ✓ |
+| Claude subscription switching | ✓ | — | — |
+| Chrome integration flag | `--chrome` | No counterpart | No counterpart |
+| Live web search flag | Provider-managed | `--search` | model/provider-managed |
 
 Codex output uses stable hook fields and the bridge never parses its unstable
 transcript JSONL directly; usage telemetry is delegated to `ccusage`'s public
-Codex JSON adapter. Claude retains its MCP Channel and transcript/status integration. See
-[the architecture](ARCHITECTURE.md) and the original
+Codex JSON adapter. Pi uses its native extension API for inbound messages,
+lifecycle, settings, usage, and safe-mode decisions; the bridge does not parse
+Pi session files. Claude retains its MCP Channel and transcript/status
+integration. See [the architecture](ARCHITECTURE.md) and the
 [Claude](docs/claude-feasibility.md) and
-[Codex](docs/codex-feasibility.md) feasibility studies.
+[Codex](docs/codex-feasibility.md) feasibility studies, plus the
+[Pi integration study](docs/pi-feasibility.md).
 
 ## Prerequisites
 
 - macOS and [Ghostty](https://ghostty.org)
 - Node.js 20 or later, `tmux`, `jq`, and `git`
-- At least one signed-in provider CLI: Claude Code, Codex CLI, or both
+- At least one configured provider CLI: Claude Code, Codex CLI, and/or Pi
 - A Slack workspace where you may create an app
 
 With Homebrew, the common command-line dependencies are:
@@ -76,8 +85,14 @@ curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/ins
 # Codex only
 curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider codex
 
-# Both providers
+# Pi only
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider pi
+
+# Claude + Codex (the historical meaning of "both")
 curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider both
+
+# Claude + Codex + Pi
+curl -fsSL https://raw.githubusercontent.com/SergioTCG/SlackAgentBridge/main/install.sh | bash -s -- --provider all
 ```
 
 The installer opens a pre-filled Slack app page. Create the app, install it to
@@ -103,12 +118,26 @@ During a safe maintenance window, restart the bridge and launch `sab-codex`.
 In that first Codex session, run `/hooks` and explicitly trust the user hook,
 then exit and launch it again. Hook trust is hash-based and is never bypassed.
 
-Apps upgrading to 1.4 must apply the canonical
+### Add Pi to an existing installation
+
+Stage the launcher and trusted extension without restarting the live daemon:
+
+```bash
+./install-pi.sh
+```
+
+Pi needs no global hook or extension registration. `sab-pi` explicitly loads
+the versioned bridge extension from this checkout on every bridged launch, so
+ordinary `pi` sessions remain untouched. Restart the daemon only in a
+controlled maintenance window after the release checks pass.
+
+Apps upgrading to 1.5 must apply the canonical
 [Slack app manifest](slack/app-manifest.json) to the **same app** once to
-register `/cc-switch` and `/codex-switch`. Older apps also receive any other
-missing commands such as `/codex-usage`. This does not change tokens or OAuth
-scopes and never requires a second Slack app. Applying it again only updates
-command registrations, metadata, and descriptions.
+register the `/pi-*` namespace and update the two older switch commands for an
+explicit Pi target. Older apps also receive any previously missing commands.
+This does not change tokens or OAuth scopes and never requires a second Slack
+app. Applying it again only updates command registrations, metadata, and
+descriptions.
 
 ## Use
 
@@ -117,6 +146,7 @@ Start a bridged terminal locally:
 ```bash
 sab-cc [Claude flags]
 sab-codex [Codex flags]
+sab-pi [Pi flags]
 ```
 
 The pre-1.1 commands `ccs` and `ccs-codex` remain silent compatibility aliases
@@ -130,37 +160,46 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 | Any message in a session channel | Inject into that session; resume it first if dormant |
 | File or image attachment | Download locally and provide the path to the agent |
 | “Create/export … and send it here” | Generate files and attach them back to this channel or thread |
-| `/cc-new [folder] [flags]` / `/codex-new [folder] [flags]` | Start the selected provider |
-| `/cc-model [model]` / `/codex-model [model]` | Show or change the provider model |
-| `/cc-effort [level]` / `/codex-effort [level]` | Show or change reasoning effort |
-| `/cc-flags [flags]` / `/codex-flags [flags]` | Show or replace allowlisted launch flags |
-| `/cc-update` / `/codex-update` | Update the selected CLI and resume the session |
-| `/cc-status` / `/codex-status` | Session details or a provider-filtered list |
-| `/cc-stop` / `/codex-stop` | Interrupt the current turn |
-| `/cc-switch [new]` / `/codex-switch [new]` | Hand this channel to the other provider; `new` explicitly replaces a missing saved leg |
-| `/cc-kill [id]` / `/codex-kill [id]` | End the process; keep its resumable channel |
-| `/cc-help` / `/codex-help` | Show commands for that provider |
+| `/cc-new [folder] [flags]` / `/codex-new …` / `/pi-new …` | Start the selected provider |
+| `/cc-model [model]` / `/codex-model …` / `/pi-model [provider/model]` | Show or change the provider model |
+| `/cc-effort [level]` / `/codex-effort …` / `/pi-effort …` | Show or change reasoning/thinking effort |
+| `/cc-flags [flags]` / `/codex-flags …` / `/pi-flags …` | Show or replace allowlisted launch flags |
+| `/cc-update` / `/codex-update` / `/pi-update` | Update the selected CLI and resume the session |
+| `/cc-status` / `/codex-status` / `/pi-status` | Session details or a provider-filtered list |
+| `/cc-stop` / `/codex-stop` / `/pi-stop` | Interrupt the current turn |
+| `/cc-switch [codex\|pi] [new]` / `/codex-switch [claude\|pi] [new]` / `/pi-switch <claude\|codex> [new]` | Hand this channel to another provider; `new` explicitly replaces a missing saved leg |
+| `/cc-kill [id]` / `/codex-kill [id]` / `/pi-kill [id]` | End the process; keep its resumable channel |
+| `/cc-help` / `/codex-help` / `/pi-help` | Show commands for that provider |
 | `/cc-account [name]` | Bind a Claude session to a stored Claude subscription |
 | `/cc-usage [days [n] \| models \| limits]` | Claude token, cost, model, and plan-limit usage via `ccusage` |
 | `/codex-usage [days [n] \| models]` | Codex session/project or aggregate token and cost usage via `ccusage` |
+| `/pi-usage [days [n] \| models]` | Pi session/project token, cost, model, and current-context usage from native events |
 | `/cc-health` / `/cc-cleanup` / `/cc-claim` | Bridge-wide operations |
 
 With no explicit Slack flags, `/cc-new` uses
 `--dangerously-skip-permissions` and `/codex-new` uses Codex's canonical
 dangerous flag. Explicit flags replace that default. Operator overrides are
 available through `CCS_NEW_FLAGS`, `CCS_CODEX_NEW_FLAGS`, `CCS_RESUME_FLAGS`,
-and `CCS_CODEX_RESUME_FLAGS`.
+`CCS_CODEX_RESUME_FLAGS`, `CCS_PI_NEW_FLAGS`, and `CCS_PI_RESUME_FLAGS`. Pi
+needs no dangerous-mode flag because its built-in tools are already
+unrestricted; use SAB `--safe` for fail-closed Slack approval of each Pi tool
+call. Pi's native `--approve` trusts project-local settings/extensions/skills
+for that run and is not a tool-permission flag.
 
-Claude's `--chrome` has no Codex CLI equivalent. Codex `--search` controls live
-web search, not a Chrome browser; browser automation requires a separately
-configured MCP server or plugin.
+Claude's `--chrome` has no Codex or Pi equivalent. Codex `--search` controls
+live web search, not a Chrome browser; Pi capabilities come from its selected
+provider/model and configured extensions/tools. Browser automation requires a
+separately configured integration.
 
 ### Switch providers without changing channels
 
-Run `/cc-switch` in an active, idle Claude Code channel to hand it to Codex, or
-`/codex-switch` in an active, idle Codex channel to hand it to Claude Code. The
-command namespace always identifies the source provider. The bridge previews
-the target leg and its provider-native flags, then waits for owner confirmation.
+Run the source provider's switch command in an active, idle session channel and
+name the target: `/cc-switch pi`, `/codex-switch pi`, or
+`/pi-switch claude`, for example. The historical bare `/cc-switch` and
+`/codex-switch` forms still default to Codex and Claude respectively; Pi always
+requires an explicit target. The command namespace identifies the source. The
+bridge previews the target leg and its provider-native flags, then waits for
+owner confirmation.
 
 The source first produces a private, structured handoff. The bridge stores it
 under `~/.config/ccs/handoffs` with restrictive permissions, stops the source,
@@ -172,18 +211,18 @@ failure or daemon restart, the provisional target is discarded and the source
 mapping is restored.
 
 A provisional target does not receive its private validation prompt merely
-because tmux exists. The bridge waits for the visible Claude/Codex input
-surface, reports any local trust gate in Slack without answering it, and then
-requires the target's native hooks to claim the session before commit. The
-channel topic intentionally remains on the source provider throughout this
-private validation window.
+because tmux exists. Claude and Codex wait for their visible input surfaces; Pi
+waits for its authenticated native extension stream. The bridge reports any
+local trust gate in Slack and requires the target adapter to claim the native
+session before commit. The channel topic intentionally remains on the source
+provider throughout this private validation window.
 
-Each channel may therefore have one active leg and one preserved standby leg.
-Models, effort, launch flags, and Claude subscription choice stay with their
-native provider and are never translated. A round trip resumes the original
-native conversation. If its saved state record is missing, the bridge refuses
-to replace it silently and offers the explicit `/cc-switch new` or
-`/codex-switch new` form.
+Each channel may therefore have one active leg and up to two preserved standby
+legs. Models, effort, launch flags, and Claude subscription choice stay with
+their native provider and are never translated. A round trip resumes the
+original native conversation. If a saved state record is missing, the bridge
+refuses to replace it silently and asks for the source provider's explicit
+`-switch <target> new` form.
 
 Before the first switch, the bridge inspects only repository-root `AGENTS.md`
 and `CLAUDE.md`; it never imports provider-global memory or `MEMORY.md`. When
@@ -199,11 +238,11 @@ without changing instructions remains available.
 
 ### Collaborators
 
-`/cc-status` or `/codex-status` in the matching session channel provides a
-user-picker for collaborators. Allowed teammates may send labelled prompts to
-a live session, but cannot run slash commands, answer permission prompts, or
-resurrect it. All other actions remain owner-only. The per-channel allowlist is
-persisted across daemon restarts.
+`/cc-status`, `/codex-status`, or `/pi-status` in the matching session channel
+provides a user-picker for collaborators. Allowed teammates may send labelled
+prompts to a live session, but cannot run slash commands, answer permission
+prompts, or resurrect it. All other actions remain owner-only. The per-channel
+allowlist is persisted across daemon restarts.
 
 ### Return generated files to Slack
 
@@ -236,11 +275,10 @@ the environment so bearer tokens never appear in process arguments.
 The public name and canonical launchers changed without replacing the installed
 protocol:
 
-- `/cc-*` remains Claude and `/codex-*` remains Codex; 1.2 adds
-  `/codex-usage`, while 1.4 adds the provider-scoped switch pair without
-  changing either namespace.
-- `sab-cc` and `sab-codex` are canonical; `sab-upload` is their shared,
-  grant-bound artifact helper; `ccs` and `ccs-codex` remain aliases.
+- `/cc-*` remains Claude and `/codex-*` remains Codex; 1.5 adds `/pi-*` without
+  changing either established namespace or their bare-switch defaults.
+- `sab-cc`, `sab-codex`, and `sab-pi` are canonical; `sab-upload` is their
+  shared, grant-bound artifact helper; `ccs` and `ccs-codex` remain aliases.
 - `CCS_*`, `~/.config/ccs`, state records, and port `8877` are unchanged.
 - Existing `~/.claudeslackproxy` installations remain in place.
 - `si.sergej.claudeslackproxy` remains the sole LaunchAgent label.
@@ -258,6 +296,8 @@ Generated-file delivery requires no Slack app change; see the
 [1.3 migration guide](docs/migrating-to-1.3.md).
 Provider handoff requires the same-app command refresh described in the
 [1.4 migration guide](docs/migrating-to-1.4.md).
+Pi activation and the one-time `/pi-*` manifest refresh are covered in the
+[1.5 migration guide](docs/migrating-to-1.5.md).
 
 ## Operations
 

@@ -81,7 +81,7 @@ async function psField(field, pid) {
 // remains as a compatibility wrapper for the existing channel server paths.
 export async function resolveAgentPid(start, provider = 'claude') {
   let pid = Number(start)
-  const match = provider === 'codex' ? /codex/i : /claude/i
+  const match = provider === 'codex' ? /codex/i : provider === 'pi' ? /(?:^|\/)pi(?:$|\s)/i : /claude/i
   for (let hop = 0; hop < 6 && pid > 1; hop++) {
     const comm = await psField('comm', pid)
     if (match.test(comm)) return pid
@@ -339,10 +339,12 @@ export const safeAccount = a => (typeof a === 'string' && /^[A-Za-z0-9_-]{1,64}$
 
 export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, account, provider = 'claude' }) {
   const acct = provider === 'claude' ? safeAccount(account) : null
-  const launcher = provider === 'codex' ? 'sab-codex' : 'sab-cc'
+  const launchers = { claude: 'sab-cc', codex: 'sab-codex', pi: 'sab-pi' }
+  const launcher = launchers[provider] || launchers.claude
   // Only the NAME travels in the command line (ps is world-readable); `sab-cc`
   // resolves it to the token from the 0600 accounts file.
-  const launcherCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${provider === 'codex' ? ' CCS_PROVIDER=codex' : ''}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', launcher))} ${args.map(shq).join(' ')}`
+  const providerEnv = provider === 'claude' ? '' : ` CCS_PROVIDER=${provider}`
+  const launcherCmd = `CCS_BRIDGE=1 CCS_TMUX=${tmuxName}${providerEnv}${acct ? ` CCS_ACCOUNT=${acct}` : ''} ${shq(path.join(BRIDGE, 'bin', launcher))} ${args.map(shq).join(' ')}`
   if (process.env.CCS_GHOSTTY_SINGLE === '1') {
     // Single-icon mode: the daemon owns the tmux session (created detached);
     // windows are just viewports requested from the one bridge instance.
@@ -371,7 +373,9 @@ export async function ghosttySpawn({ cwd, args, title, tmuxName, autoConsent, ac
         if (pane.trim()) lastPane = pane
         const readyPattern = provider === 'codex'
           ? /codex|openai|review hooks|what would you like/i
-          : /bypass permissions|shift\+tab to cycle/
+          : provider === 'pi'
+            ? /\bpi\b|qwen|thinking|tokens/i
+            : /bypass permissions|shift\+tab to cycle/
         if (readyPattern.test(pane)) ready = true
       }
       if (!ready && (await tmuxAlive(tmuxName))) { ready = true; log('boot verification timed out but tmux alive — proceeding', tmuxName) }

@@ -56,7 +56,7 @@ try {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-ccs-provider': process.env.CCS_PROVIDER === 'codex' ? 'codex' : 'claude',
+      'x-ccs-provider': ['codex', 'pi'].includes(process.env.CCS_PROVIDER) ? process.env.CCS_PROVIDER : 'claude',
     },
     body: JSON.stringify({ grant, paths: files.map(file => path.resolve(file)) }),
     signal: AbortSignal.timeout(10 * 60 * 1000),

@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   codexProjectUsage, codexSessionUsage, codexTokenSnapshot, codexTurnTokenDelta,
-  formatCodexWorkingStatus, formatTokens, usageCost, usageDate, usageRows,
+  formatCodexWorkingStatus, formatPiWorkingStatus, formatTokens, normalizePiUsage,
+  piUsageRows, usageCost, usageDate, usageRows,
 } from '../daemon/usage.mjs'
 
 const sid = '019fff4d-9217-7ee1-825d-528aec50a0e9'
@@ -63,4 +64,33 @@ test('provider usage schema helpers accept Claude and Codex ccusage JSON', () =>
   assert.equal(usageCost({ totalCost: 1.25 }), 1.25)
   assert.equal(usageCost({ costUSD: 2.5 }), 2.5)
   assert.equal(formatTokens(12_345), '12.3k')
+})
+
+test('Pi usage normalization retains tokens, context, and zero-cost local models', () => {
+  assert.deepEqual(normalizePiUsage({
+    input: 1200, output: 300, cacheRead: 50, cacheWrite: 25, totalTokens: 1575,
+    cost: { total: 0 },
+  }, { tokens: 4000, contextWindow: 131072, percent: 3.05 }), {
+    inputTokens: 1200, outputTokens: 300, cacheReadTokens: 50, cacheWriteTokens: 25,
+    totalTokens: 1575, cost: 0, contextTokens: 4000, contextWindow: 131072, contextPercent: 3.05,
+  })
+})
+
+test('Pi working status includes elapsed time and live token counts', () => {
+  assert.equal(formatPiWorkingStatus({
+    startedAt: 0, now: 65000,
+    usage: { totalTokens: 1575, outputTokens: 300, contextPercent: 3.05 },
+  }), '⚙️ Pi is working… (1m 05s · 1.6k tokens this turn · ↓ 300 out · context 3%)')
+})
+
+test('Pi usage ledger can filter by session, project, day, and model', () => {
+  const rows = [
+    { at: Date.parse('2026-08-18T10:00:00Z'), sessionId: 'a', cwd: '/repo', model: 'local/a', totalTokens: 100 },
+    { at: Date.parse('2026-08-19T10:00:00Z'), sessionId: 'b', cwd: '/repo', model: 'local/b', totalTokens: 200 },
+    { at: Date.parse('2026-08-19T11:00:00Z'), sessionId: 'c', cwd: '/other', model: 'local/a', totalTokens: 300 },
+  ]
+  assert.deepEqual(piUsageRows(rows, { sessionId: 'b' }).map(row => row.totalTokens), [200])
+  assert.deepEqual(piUsageRows(rows, { cwd: '/repo' }).map(row => row.totalTokens), [100, 200])
+  assert.deepEqual(piUsageRows(rows, { since: Date.parse('2026-08-19T00:00:00Z') }).map(row => row.totalTokens), [200, 300])
+  assert.deepEqual(piUsageRows(rows, { model: 'local/a' }).map(row => row.totalTokens), [100, 300])
 })

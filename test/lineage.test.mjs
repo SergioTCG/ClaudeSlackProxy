@@ -15,9 +15,17 @@ test('legacy sessions get a Claude lineage lazily on first switch only', () => {
   const state = legacyState()
   assert.equal(state.lineages, undefined)
   const lineage = ensureLineage(state, 'C1', state.sessions.old)
-  assert.deepEqual(lineage.legs, { claude: 'old', codex: null })
+  assert.deepEqual(lineage.legs, { claude: 'old', codex: null, pi: null })
   assert.equal(lineage.activeProvider, 'claude')
   assert.equal(lineageFor(state, 'C1'), lineage)
+})
+
+test('existing two-provider lineages gain an empty Pi leg only when touched', () => {
+  const state = legacyState()
+  state.lineages = { C1: { version: 1, generation: 2, activeProvider: 'claude', legs: { claude: 'old', codex: 'cx' }, transition: null } }
+  const lineage = ensureLineage(state, 'C1', state.sessions.old)
+  assert.equal(lineage.version, 2)
+  assert.deepEqual(lineage.legs, { claude: 'old', codex: 'cx', pi: null })
 })
 
 test('a transition preserves provider-native target flags and exact tmux matching', () => {
@@ -36,6 +44,20 @@ test('a transition preserves provider-native target flags and exact tmux matchin
   assert.equal(transitionForTarget(state, 'codex', 'wrong'), null)
 })
 
+test('a transition can explicitly target Pi without disturbing the Codex standby leg', () => {
+  const state = legacyState()
+  state.sessions.cx = { id: 'cx', provider: 'codex', cwd: '/tmp/repo', channel: null }
+  const lineage = ensureLineage(state, 'C1', state.sessions.old)
+  lineage.legs.codex = 'cx'
+  assert.throws(() => beginTransition(state, 'C1', state.sessions.old, { targetProvider: 'claude' }), /active provider/)
+  const transition = beginTransition(state, 'C1', state.sessions.old, {
+    id: 'to-pi', targetProvider: 'pi', targetFlags: ['--safe'],
+  })
+  assert.equal(transition.target.provider, 'pi')
+  assert.equal(transition.target.sid, null)
+  assert.equal(lineage.legs.codex, 'cx')
+})
+
 test('commit makes exactly the target leg active and supports a round trip', () => {
   const state = legacyState()
   let transition = beginTransition(state, 'C1', state.sessions.old, { id: 'to-codex' })
@@ -45,7 +67,7 @@ test('commit makes exactly the target leg active and supports a round trip', () 
   assert.equal(state.channels.C1, 'cx')
   assert.equal(state.sessions.old.channel, null)
   assert.equal(state.sessions.cx.channel, 'C1')
-  assert.deepEqual(state.lineages.C1.legs, { claude: 'old', codex: 'cx' })
+  assert.deepEqual(state.lineages.C1.legs, { claude: 'old', codex: 'cx', pi: null })
 
   transition = beginTransition(state, 'C1', state.sessions.cx, { id: 'to-claude', targetFlags: ['--chrome'] })
   assert.equal(transition.target.sid, 'old')
@@ -57,6 +79,29 @@ test('commit makes exactly the target leg active and supports a round trip', () 
   assert.equal(state.lineages.C1.generation, 2)
   assert.equal(standbyForSession(state, 'cx').provider, 'codex')
   assert.equal(standbyForSession(state, 'old'), null)
+})
+
+test('a three-provider lineage preserves every native leg while rotating the active mapping', () => {
+  const state = legacyState()
+  let transition = beginTransition(state, 'C1', state.sessions.old, { id: 'to-pi', targetProvider: 'pi' })
+  state.sessions.pi1 = { id: 'pi1', provider: 'pi', cwd: '/tmp/repo', channel: null }
+  transition.target.sid = 'pi1'
+  commitTransition(state, 'C1', state.sessions.pi1)
+
+  transition = beginTransition(state, 'C1', state.sessions.pi1, { id: 'to-codex', targetProvider: 'codex' })
+  state.sessions.cx = { id: 'cx', provider: 'codex', cwd: '/tmp/repo', channel: null }
+  transition.target.sid = 'cx'
+  commitTransition(state, 'C1', state.sessions.cx)
+
+  transition = beginTransition(state, 'C1', state.sessions.cx, { id: 'to-claude', targetProvider: 'claude' })
+  assert.equal(transition.target.sid, 'old')
+  commitTransition(state, 'C1', state.sessions.old)
+  assert.deepEqual(state.lineages.C1.legs, { claude: 'old', codex: 'cx', pi: 'pi1' })
+  assert.equal(state.lineages.C1.activeProvider, 'claude')
+  assert.equal(state.channels.C1, 'old')
+  assert.equal(state.sessions.old.channel, 'C1')
+  assert.equal(state.sessions.cx.channel, null)
+  assert.equal(state.sessions.pi1.channel, null)
 })
 
 test('rollback restores the source mapping without discarding a native target leg', () => {

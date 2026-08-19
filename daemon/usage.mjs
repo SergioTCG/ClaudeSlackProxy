@@ -74,3 +74,37 @@ export function formatCodexWorkingStatus({ startedAt, now = Date.now(), baseline
   }
   return `⚙️ Codex is working… (${parts.join(' · ')})`
 }
+
+export function normalizePiUsage(usage, contextUsage = null) {
+  if (!usage && !contextUsage) return null
+  const number = value => Number.isFinite(Number(value)) ? Number(value) : 0
+  return {
+    inputTokens: number(usage?.input),
+    outputTokens: number(usage?.output),
+    cacheReadTokens: number(usage?.cacheRead),
+    cacheWriteTokens: number(usage?.cacheWrite),
+    totalTokens: number(usage?.totalTokens ?? usage?.total),
+    cost: number(usage?.cost?.total ?? usage?.cost),
+    contextTokens: number(contextUsage?.tokens),
+    contextWindow: number(contextUsage?.contextWindow),
+    contextPercent: number(contextUsage?.percent),
+  }
+}
+
+export function formatPiWorkingStatus({ startedAt, now = Date.now(), usage }) {
+  const parts = [formatElapsed(startedAt, now)]
+  if (usage?.totalTokens > 0) parts.push(`${formatTokens(usage.totalTokens)} tokens this turn`)
+  if (usage?.outputTokens > 0) parts.push(`↓ ${formatTokens(usage.outputTokens)} out`)
+  if (usage?.contextPercent > 0) parts.push(`context ${Math.round(usage.contextPercent)}%`)
+  return `⚙️ Pi is working… (${parts.join(' · ')})`
+}
+
+export function piUsageRows(rows, { sessionId, cwd, since, model } = {}) {
+  return (Array.isArray(rows) ? rows : []).filter(row => {
+    if (sessionId && row?.sessionId !== sessionId) return false
+    if (cwd && (!row?.cwd || path.resolve(row.cwd) !== path.resolve(cwd))) return false
+    if (since && Number(row?.at || 0) < Number(since)) return false
+    if (model && row?.model !== model) return false
+    return true
+  })
+}
