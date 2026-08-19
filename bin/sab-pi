@@ -25,6 +25,11 @@ PI_ARGS=()
 for arg in "$@"; do
   if [ "$arg" = "--safe" ]; then
     export CCS_PI_SAFE=1
+  elif [[ "$arg" == --model=* || "$arg" == --thinking=* || "$arg" == --provider=* ]]; then
+    # Slack accepts only inline values so each remote token can be validated as
+    # one allowlisted unit. Pi's parser accepts these options only as argv
+    # pairs, however, so canonicalize them at the provider boundary.
+    PI_ARGS+=("${arg%%=*}" "${arg#*=}")
   else
     PI_ARGS+=("$arg")
   fi

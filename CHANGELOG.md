@@ -4,6 +4,16 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.3] — 2026-08-19
+
+### Fixed
+- Pi launch and resume commands now translate the bridge's securely validated
+  inline `--model=`, `--thinking=`, and `--provider=` values into the separate
+  argument form required by Pi 0.84.2, instead of exiting at startup with an
+  unknown-options error.
+
+[1.5.0-rc.3]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.3
+
 ## [1.5.0-rc.2] — 2026-08-19
 
 ### Added

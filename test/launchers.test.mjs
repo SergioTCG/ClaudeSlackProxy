@@ -48,3 +48,30 @@ test('canonical launchers export an authoritative provider for shared helpers', 
   assert.match(pi, /export CCS_PROVIDER=pi/)
   assert.match(pi, /--extension/)
 })
+
+test('sab-pi translates validated inline value flags to Pi native argv pairs', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sab-pi-argv-'))
+  try {
+    const fakePi = path.join(temp, 'pi')
+    fs.writeFileSync(fakePi, '#!/bin/bash\nprintf "%s\\n" "$@"\n', { mode: 0o755 })
+    const run = spawnSync(path.join(root, 'bin', 'sab-pi'), [
+      '--safe',
+      '--model=qwen38-local/qwen3.8-27b',
+      '--thinking=xhigh',
+      '--provider=local',
+      '--session', 'pi-session-id',
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env, CCS_NO_TMUX: '1', PATH: `${temp}:${process.env.PATH}` },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.deepEqual(run.stdout.trim().split('\n').slice(2), [
+      '--model', 'qwen38-local/qwen3.8-27b',
+      '--thinking', 'xhigh',
+      '--provider', 'local',
+      '--session', 'pi-session-id',
+    ])
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true })
+  }
+})
