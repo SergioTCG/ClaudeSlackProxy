@@ -4,6 +4,16 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.4] — 2026-08-19
+
+### Fixed
+- Claude login-expired and API-overloaded turns are now mirrored immediately
+  even when Claude returns to idle without emitting its normal `Stop` hook.
+  Detection reads only new transcript records, clears the live working status,
+  and suppresses repeated identical failures for a bounded interval.
+
+[1.5.0-rc.4]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.4
+
 ## [1.5.0-rc.3] — 2026-08-19
 
 ### Fixed

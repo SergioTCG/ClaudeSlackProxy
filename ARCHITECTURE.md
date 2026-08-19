@@ -85,7 +85,11 @@ Slack (private channels, Socket Mode)
 5. **tmux everywhere** (inside the visible Ghostty window — the terminal invariant holds). This solves the two problems the Channels API can't: the research-preview **consent dialog** (daemon auto-acknowledges it in daemon-spawned windows via `send-keys`, since nobody is at the Mac to click it), and **in-session commands** — `/cc-model sonnet` in Slack becomes `tmux send-keys "/model sonnet" Enter`, and `/cc-stop` sends `Escape` to interrupt.
 6. **Private channels only; single trusted sender.** The workspace has 35 people. Only messages from `SLACK_USER_ID` are processed; everyone else is silently ignored (and can't see the channels anyway).
 7. **Mirroring is provider-event-driven and token-free.** Claude keeps its byte-offset
-   JSONL reader and TUI status/form parser. Codex uses the stable
+   JSONL reader and TUI status/form parser. Its bounded poller also recognizes
+   new failure-only authentication and overload records, because Claude can
+   return immediately to idle without emitting `Stop`; these failures are
+   delivered promptly and repeated identical failures are time-deduplicated.
+   Codex uses the stable
    `Stop.last_assistant_message` hook field; the bridge never parses Codex's
    explicitly unstable transcript format. Usage and live token counters enter
    only through `ccusage`'s maintained Codex JSON adapter. Pi's native extension

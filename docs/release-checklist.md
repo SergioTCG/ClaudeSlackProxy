@@ -53,6 +53,9 @@
 - [ ] Confirm no active turn is in progress before restart.
 - [ ] Exactly one daemon connects with the production Socket Mode token.
 - [ ] Existing and fresh Claude sessions send and receive Slack messages.
+- [ ] Claude login-expired and API-overloaded turns surface immediately in
+      Slack even when the CLI emits no `Stop`; repeated identical failures are
+      deduplicated and the live working message is cleared.
 - [ ] Existing and fresh Codex sessions send and receive Slack messages.
 - [ ] Existing and fresh Pi sessions send and receive Slack messages.
 - [ ] Claude, Codex, and Pi terminal-close → Slack-prompt → Ghostty-resume works.

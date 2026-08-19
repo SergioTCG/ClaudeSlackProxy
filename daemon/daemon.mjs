@@ -45,6 +45,9 @@ import {
   normalizeManagedPolicy, parseManagedRunCommand, sanitizeManagedSnapshot, sanitizeRoutingSnapshot,
 } from '../pi/managed-core.mjs'
 import {
+  CLAUDE_FAILURE_DEDUPE_MS, claudePollerDecision, prepareClaudeTerminalDelivery,
+} from './claude-terminal.mjs'
+import {
   buildInstructionDocuments, buildInstructionPatch, deterministicWrapperPatch, fingerprintsMatch,
   inspectInstructions, instructionDocumentsPrompt, instructionProgressText, instructionProposalTimeout,
   parseInstructionDocuments,
@@ -336,6 +339,15 @@ async function clearStatus(session) {
 // While a turn runs, mirror the terminal's spinner line (verb + elapsed + tokens)
 // into the edit-in-place status message. Reads rendered pane output, not internals.
 const pollers = new Map() // sid → { timer, last }
+const claudeTerminalFailures = new Map() // sid → { key, at }; bounded duplicate suppression
+function rememberClaudeTerminalFailure(sid, failure) {
+  claudeTerminalFailures.set(sid, failure)
+  const timer = setTimeout(() => {
+    const current = claudeTerminalFailures.get(sid)
+    if (current?.key === failure.key && current?.at === failure.at) claudeTerminalFailures.delete(sid)
+  }, CLAUDE_FAILURE_DEDUPE_MS)
+  timer.unref?.()
+}
 function extractSpinner(pane) {
   const lines = pane.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -428,21 +440,41 @@ function startPoller(session) {
     const pane = await tmuxCapture(session.tmux)
     const line = extractSpinner(pane)
     if (p.stopped) return // Stop fired during the capture — don't re-post
-    if (line) {
-      p.sawSpinner = true; p.idle = 0
+    const form = line ? null : extractQuestionForm(pane)
+    // Login expiry and provider overload can finish before the 3-second poller
+    // ever observes a spinner, and Claude emits no Stop for either. Inspect only
+    // NEW transcript records so stale errors in terminal scrollback cannot end a
+    // later healthy turn.
+    const newAssistantText = line ? '' : peekNewAssistantText(session)
+    const decision = claudePollerDecision({
+      spinner: Boolean(line), newAssistantText, hasForm: Boolean(form),
+      sawSpinner: p.sawSpinner, idleTicks: p.idle,
+      pendingPermission: hasPendingPerm(session),
+    })
+    p.idle = decision.idleTicks
+    if (decision.action === 'working') {
+      p.sawSpinner = true
       if (qforms.has(session.id)) await clearQuestionForm(session) // answered (Slack or terminal) — turn resumed
       if (line !== p.last) { p.last = line; await setStatus(session, line) }
-    } else {
-      const form = extractQuestionForm(pane)
-      if (form) { p.idle = 0; await relayQuestionForm(session, form); return } // waiting on the user, not finished
-      if (p.sawSpinner && !hasPendingPerm(session) && ++p.idle >= 4) {
-        // The spinner vanished for ~12s after a turn was running: the turn ended.
-        // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
-        // long/compacted turn), do it here so the response is never silently lost.
-        p.stopped = true
-        log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
-        await finalizeTurn(session)
-      }
+      return
+    }
+    if (decision.action === 'form') {
+      await relayQuestionForm(session, form)
+      return // waiting on the user, not finished
+    }
+    if (decision.action === 'failure') {
+      p.stopped = true
+      log('poller failure finalize (Stop hook missing)', session.id.slice(0, 8), decision.failure.key)
+      await finalizeTurn(session, { terminalFailure: decision.failure })
+      return
+    }
+    if (decision.action === 'finalize') {
+      // The spinner vanished for ~12s after a turn was running: the turn ended.
+      // Normally the Stop hook finalizes; if it never arrives (a missed hook, or a
+      // long/compacted turn), do it here so the response is never silently lost.
+      p.stopped = true
+      log('poller finalize (Stop hook missing)', session.id.slice(0, 8))
+      await finalizeTurn(session)
     }
   }, 3000)
   pollers.set(session.id, p)
@@ -565,13 +597,20 @@ const hasPendingPerm = session => Object.values(state.perms).some(p => p.channel
 // Stop hook and, as a fallback, by the poller when a turn ends without a Stop.
 // Idempotent: readNewAssistantText advances the read offset, so a second caller
 // (whichever of Stop / poller runs later) reads nothing and posts nothing.
-async function finalizeTurn(session) {
+async function finalizeTurn(session, { terminalFailure = null } = {}) {
   stopPoller(session)
   await clearStatus(session)
   await clearQuestionForm(session)
   if (session.transcript) await waitTranscriptSettle(session.transcript)
-  const text = readNewAssistantText(session)
-  if (text) await postMd(session.channel, text)
+  const rawText = readNewAssistantText(session)
+  const delivery = prepareClaudeTerminalDelivery(
+    rawText || terminalFailure?.text || '',
+    claudeTerminalFailures.get(session.id),
+  )
+  if (delivery.failure) rememberClaudeTerminalFailure(session.id, delivery.failure)
+  else if (delivery.text) claudeTerminalFailures.delete(session.id) // a successful answer resets suppression
+  if (delivery.text && !delivery.suppress) await postMd(session.channel, delivery.text)
+  else if (delivery.suppress) log('suppressed duplicate Claude terminal failure', session.id.slice(0, 8), delivery.failure?.key)
   saveState(state)
   // Plan-approval (and similar) dialogs render AFTER the Stop hook, when no
   // poller is watching — check once, shortly after, and hand off to a poller.
@@ -706,10 +745,10 @@ async function waitTranscriptSettle(file, maxMs = 4000) {
   }
 }
 
-// Reads assistant text written since session.offset. Safe to call mid-turn:
-// only advances offset past COMPLETE lines, so a record being flushed is never
-// cut in half (which would orphan its bytes and lose the message).
-function readNewAssistantText(session) {
+// Reads assistant text written since session.offset. Only COMPLETE lines are
+// parsed, so a record being flushed is never cut in half. Poller failure
+// detection peeks without advancing; final delivery advances atomically.
+function assistantTextSinceOffset(session, advance = false) {
   if (providerOf(session) !== 'claude') return ''
   const f = session.transcript
   if (!f || !fs.existsSync(f)) return ''
@@ -723,7 +762,7 @@ function readNewAssistantText(session) {
   const str = buf.toString('utf8')
   const lastNl = str.lastIndexOf('\n')
   if (lastNl < 0) return '' // no complete line yet; wait for more
-  session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
+  if (advance) session.offset = from + Buffer.byteLength(str.slice(0, lastNl + 1), 'utf8')
   const out = []
   for (const line of str.slice(0, lastNl).split('\n')) {
     if (!line.trim()) continue
@@ -736,6 +775,9 @@ function readNewAssistantText(session) {
   }
   return out.join('\n\n')
 }
+
+const peekNewAssistantText = session => assistantTextSinceOffset(session, false)
+const readNewAssistantText = session => assistantTextSinceOffset(session, true)
 
 async function privateAssistantText(session, body = {}) {
   stopPoller(session)
