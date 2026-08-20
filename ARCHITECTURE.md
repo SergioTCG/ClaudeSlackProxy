@@ -54,7 +54,10 @@ Slack (private channels, Socket Mode)
   goal/plan state through Pi's extension API,
   drives the parent worker across multiple turns, launches isolated child Pi
   planners/scouts/reviewers, and requires independent review before the final
-  response. `pi/managed-core.mjs` contains the daemon-safe parser/state model.
+  response. Planner/reviewer children explicitly load only
+  `pi/managed-child-output.ts`, whose typed terminating tools return validated
+  plan/review data without an extra prose turn. `pi/managed-core.mjs` contains
+  the daemon-safe parser/state model.
 - **`bin/sab-upload`** — a provider-neutral agent helper. It submits generated
   file paths to the loopback daemon with the session's provider/tmux identity
   and a one-use grant supplied only by an accepted Slack prompt. It cannot
@@ -142,9 +145,11 @@ Slack (private channels, Socket Mode)
     `always` and `native` policies are session-persistent, `/pi-run direct`
     bypasses once, and `/pi-run <goal>` always forces the managed state machine.
     Child processes receive the selected model/thinking setting and role-bound
-    tools, but no bridge/session/upload identity, extensions, skills, themes, or
-    project-resource approval. Read-only review is reserved in the subagent
-    budget and must pass before the final response is mirrored.
+    tools, but no bridge/session/upload identity, inherited extensions, skills,
+    themes, or project-resource approval. Planner/reviewer output uses one
+    bridge-owned terminating submission extension; malformed legacy output gets
+    at most one no-tools repair attempt. Read-only review is reserved in the
+    subagent budget and must pass before the final response is mirrored.
 
 ## Command grammar (Slack)
 

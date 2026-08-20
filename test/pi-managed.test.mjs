@@ -4,7 +4,7 @@ import {
   budgetExceeded, createManagedRun, formatManagedProgress, managedSnapshot, markCompletedSteps,
   normalizeManagedPolicy, parseManagedPlan, parseManagedReview, parseManagedRoute,
   parseManagedRunCommand, restoreManagedRun, sanitizeManagedSnapshot,
-  sanitizeRoutingSnapshot, subagentBudgetReason,
+  sanitizeRoutingSnapshot, structuredChildSubmission, subagentBudgetReason,
 } from '../pi/managed-core.mjs'
 
 test('managed Pi command defaults to an automatic run and accepts bounded budgets', () => {
@@ -68,6 +68,33 @@ test('managed plans prefer tagged JSON and fall back to numbered text', () => {
   assert.throws(() => parseManagedPlan('1. Only one step'), /at least two steps/i)
 })
 
+test('managed plans and reviews consume terminating child-tool submissions', () => {
+  const planEvent = {
+    type: 'tool_execution_end', toolName: 'sab_submit_plan', isError: false,
+    result: { details: { kind: 'plan', summary: 'Repair architecture', steps: ['Map violations', 'Migrate boundaries'], risks: ['wide diff'] } },
+  }
+  const planSubmission = structuredChildSubmission(planEvent)
+  assert.deepEqual(parseManagedPlan('', planSubmission), {
+    summary: 'Repair architecture',
+    steps: [
+      { id: 1, text: 'Map violations', status: 'pending' },
+      { id: 2, text: 'Migrate boundaries', status: 'pending' },
+    ],
+    risks: ['wide diff'],
+  })
+
+  const reviewEvent = {
+    type: 'tool_execution_end', toolName: 'sab_submit_review', isError: false,
+    result: { details: { kind: 'review', verdict: 'fix', summary: 'One defect', findings: ['src/a.ts:1 - fix boundary'] } },
+  }
+  assert.deepEqual(parseManagedReview('', structuredChildSubmission(reviewEvent)), {
+    verdict: 'fix', summary: 'One defect', findings: ['src/a.ts:1 - fix boundary'],
+  })
+  assert.equal(structuredChildSubmission({ ...planEvent, isError: true }), null)
+  assert.equal(structuredChildSubmission({ type: 'message_end', result: planEvent.result }), null)
+  assert.equal(structuredChildSubmission({ ...planEvent, toolName: 'read' }), null)
+})
+
 test('managed run progress is persistent, marker-driven, and budgeted', () => {
   const run = createManagedRun({
     id: 'run-1', goal: 'Ship it', mode: 'auto', now: 1_000,
@@ -121,6 +148,7 @@ test('optional subagents cannot consume slots reserved for independent review', 
   assert.match(subagentBudgetReason(run, 'scout'), /reserved/i)
   assert.match(subagentBudgetReason(run, 'planner'), /reserved/i)
   assert.match(subagentBudgetReason(run, 'reviewer'), /reserved/i)
+  assert.match(subagentBudgetReason(run, 'planner', true), /reserved/i)
   assert.equal(subagentBudgetReason(run, 'reviewer', true), null)
   run.counters.subagents = 4
   assert.match(subagentBudgetReason(run, 'reviewer'), /budget reached/i)

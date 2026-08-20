@@ -82,6 +82,9 @@
 - [ ] Managed planner/scout/reviewer children make no writes and never create a
       Slack channel. `--safe` rejects worker children while the parent remains
       behind Slack approval; cancel terminates an active child promptly.
+- [ ] Planner/reviewer children terminate through their typed submission tools;
+      malformed prose gets at most one no-tools repair and a bounded diagnostic
+      while the independent-review budget remains reserved.
 - [ ] Claude → Codex and Codex → the original Claude leg preserve one channel,
       provider-native IDs/settings, queued-message order, and topic metadata.
 - [ ] Claude ↔ Pi, Codex ↔ Pi, and a three-leg round trip preserve one active

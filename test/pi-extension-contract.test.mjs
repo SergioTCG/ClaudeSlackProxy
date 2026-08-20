@@ -5,6 +5,7 @@ import fs from 'node:fs'
 const launcher = fs.readFileSync(new URL('../bin/sab-pi', import.meta.url), 'utf8')
 const extension = fs.readFileSync(new URL('../pi/sab-extension.ts', import.meta.url), 'utf8')
 const managed = fs.readFileSync(new URL('../pi/managed-run.ts', import.meta.url), 'utf8')
+const managedChild = fs.readFileSync(new URL('../pi/managed-child-output.ts', import.meta.url), 'utf8')
 const daemon = fs.readFileSync(new URL('../daemon/daemon.mjs', import.meta.url), 'utf8')
 
 test('Pi bridge extension is explicit and bridge safe mode never leaks to the Pi CLI', () => {
@@ -34,6 +35,12 @@ test('Pi managed runs and adaptive routing persist state and isolate child agent
   assert.match(managed, /sab_goal/)
   assert.match(managed, /sab_subagent/)
   assert.match(managed, /--no-extensions/)
+  assert.match(managed, /--extension", MANAGED_CHILD_EXTENSION/)
+  assert.match(managed, /structuredChildSubmission/)
+  assert.match(managed, /after one repair attempt/)
+  assert.match(managedChild, /sab_submit_plan/)
+  assert.match(managedChild, /sab_submit_review/)
+  assert.match(managedChild, /terminate: true/)
   assert.match(managed, /SLACK_\|CODEX_\|CLAUDE_CODE_/)
   assert.match(managed, /"ManagedStatus"/)
   assert.match(managed, /"ManagedPlan"/)

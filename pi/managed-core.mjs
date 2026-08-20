@@ -122,17 +122,27 @@ function normalizeSteps(values) {
   return steps
 }
 
-export function parseManagedPlan(output) {
+export function structuredChildSubmission(event) {
+  if (event?.type !== 'tool_execution_end' || event?.isError) return null
+  const details = event?.result?.details
+  if (!details || !['plan', 'review'].includes(details.kind)) return null
+  if (event.toolName !== `sab_submit_${details.kind}`) return null
+  return details
+}
+
+export function parseManagedPlan(output, submission = null) {
   const text = String(output || '')
-  let parsed = null
-  const tagged = /<SAB_PLAN_JSON>\s*([\s\S]*?)\s*<\/SAB_PLAN_JSON>/i.exec(text)
-  if (tagged) {
-    try { parsed = JSON.parse(tagged[1]) } catch {}
-  }
+  let parsed = submission?.kind === 'plan' ? submission : null
   if (!parsed) {
-    const fenced = /```json\s*([\s\S]*?)\s*```/i.exec(text)
-    if (fenced) {
-      try { parsed = JSON.parse(fenced[1]) } catch {}
+    const tagged = /<SAB_PLAN_JSON>\s*([\s\S]*?)\s*<\/SAB_PLAN_JSON>/i.exec(text)
+    if (tagged) {
+      try { parsed = JSON.parse(tagged[1]) } catch {}
+    }
+    if (!parsed) {
+      const fenced = /```json\s*([\s\S]*?)\s*```/i.exec(text)
+      if (fenced) {
+        try { parsed = JSON.parse(fenced[1]) } catch {}
+      }
     }
   }
 
@@ -149,11 +159,13 @@ export function parseManagedPlan(output) {
   }
 }
 
-export function parseManagedReview(output) {
-  const tagged = /<SAB_REVIEW_JSON>\s*([\s\S]*?)\s*<\/SAB_REVIEW_JSON>/i.exec(String(output || ''))
-  let parsed = null
-  if (tagged) {
-    try { parsed = JSON.parse(tagged[1]) } catch {}
+export function parseManagedReview(output, submission = null) {
+  let parsed = submission?.kind === 'review' ? submission : null
+  if (!parsed) {
+    const tagged = /<SAB_REVIEW_JSON>\s*([\s\S]*?)\s*<\/SAB_REVIEW_JSON>/i.exec(String(output || ''))
+    if (tagged) {
+      try { parsed = JSON.parse(tagged[1]) } catch {}
+    }
   }
   const findings = Array.isArray(parsed?.findings)
     ? parsed.findings.map(item => cleanText(item, 1500)).filter(Boolean).slice(0, 20)
@@ -270,7 +282,7 @@ export function subagentBudgetReason(run, role, required = false) {
   if (!run?.budgets || !run?.counters) return 'managed-run state is invalid'
   if (run.counters.subagents >= run.budgets.maxSubagents) return `subagent budget reached (${run.budgets.maxSubagents})`
   const reservedReviews = Math.max(1, run.budgets.maxReviewCycles - run.counters.reviewCycles)
-  if (!required && run.counters.subagents >= run.budgets.maxSubagents - reservedReviews) {
+  if (!(required && role === 'reviewer') && run.counters.subagents >= run.budgets.maxSubagents - reservedReviews) {
     return `subagent budget is reserved for ${reservedReviews} remaining independent review leg(s)`
   }
   return null

@@ -2,18 +2,20 @@ import { spawn, execFile as execFileCallback } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   budgetExceeded, createManagedRun, managedSnapshot, markCompletedSteps,
   normalizeManagedPolicy, parseManagedPlan, parseManagedReview, parseManagedRoute,
-  restoreManagedRun, sanitizeRoutingSnapshot, subagentBudgetReason,
+  restoreManagedRun, sanitizeRoutingSnapshot, structuredChildSubmission, subagentBudgetReason,
 } from "./managed-core.mjs";
 
 const execFile = promisify(execFileCallback);
 const STATE_ENTRY = "sab-managed-run";
 const POLICY_ENTRY = "sab-managed-policy";
 const ROUTE_ENTRY = "sab-managed-route";
+const MANAGED_CHILD_EXTENSION = fileURLToPath(new URL("./managed-child-output.ts", import.meta.url));
 const CHILD_OUTPUT_LIMIT = 50 * 1024;
 const REVIEW_DIFF_LIMIT = 60 * 1024;
 const CHILD_TIMEOUT_MS = 15 * 60_000;
@@ -39,6 +41,7 @@ type ChildResult = {
   usage: Record<string, any>;
   turns: number;
   model?: string;
+  structured?: Record<string, any>;
 };
 
 type ManagedDecision = { managed: boolean; mirror: boolean };
@@ -61,28 +64,20 @@ or
 <SAB_ROUTE_JSON>{"route":"native","reason":"short reason"}</SAB_ROUTE_JSON>`;
 
 const ROLE_TOOLS: Record<ChildRole, string[]> = {
-  planner: ["read", "grep", "find", "ls"],
+  planner: ["read", "grep", "find", "ls", "sab_submit_plan"],
   scout: ["read", "grep", "find", "ls"],
-  reviewer: ["read", "grep", "find", "ls"],
+  reviewer: ["read", "grep", "find", "ls", "sab_submit_review"],
   worker: ["read", "bash", "edit", "write", "grep", "find", "ls"],
 };
 
 const ROLE_PROMPTS: Record<ChildRole, string> = {
   planner: `You are the planning leg of a managed coding run. Work read-only. Thoroughly inspect the repository and its canonical instructions before planning. Produce concrete, ordered, verifiable steps. Do not implement anything.
 
-Your final response MUST contain exactly one machine-readable block:
-<SAB_PLAN_JSON>{"summary":"one sentence","steps":["specific step 1","specific step 2"],"risks":["risk"]}</SAB_PLAN_JSON>
-
-Use 2-24 steps. Each step must identify the intended result and relevant files or validation where known. Do not put prose after the closing tag.`,
+Use 2-24 steps. Each step must identify the intended result and relevant files or validation where known. When the plan is ready, call sab_submit_plan as your final action. Do not print the plan as prose and do not continue after the tool call.`,
   scout: `You are a read-only scout subagent. Investigate the assigned question with the available read/search tools. Return compressed evidence with exact file paths, relevant symbols, risks, and a recommended next action. Do not modify files.`,
   reviewer: `You are the independent review leg of a managed coding run. Work read-only. Inspect the stated goal, plan, repository state, changed files, and supplied diff. Be aggressive but adjudicate findings: report only defects that are concrete and relevant to the goal.
 
-Your final response MUST contain exactly one machine-readable block:
-<SAB_REVIEW_JSON>{"verdict":"pass","summary":"...","findings":[]}</SAB_REVIEW_JSON>
-or
-<SAB_REVIEW_JSON>{"verdict":"fix","summary":"...","findings":["file:line - concrete defect and required correction"]}</SAB_REVIEW_JSON>
-
-Do not modify files and do not put prose after the closing tag.`,
+When the review is complete, call sab_submit_review as your final action. Use verdict fix only for concrete defects with an exact required correction. Do not modify files, print the verdict as prose, or continue after the tool call.`,
   worker: `You are an isolated worker subagent in a managed coding run. Follow repository instructions, make only the requested scoped changes, validate them, and report exact files changed and remaining risks. Do not commit, push, deploy, or alter unrelated work.`,
 };
 
@@ -116,6 +111,21 @@ function capped(value: string, limit = CHILD_OUTPUT_LIMIT) {
   while (Buffer.byteLength(result) > limit) result = result.slice(0, -1);
   return `${result}\n\n[truncated by managed runner]`;
 }
+
+function childResultCandidate(result: ChildResult) {
+  const candidate = String(result.text || "").trim() || (result.structured ? JSON.stringify(result.structured) : "");
+  return capped(candidate, CHILD_OUTPUT_LIMIT);
+}
+
+function parseFailureExcerpt(result: ChildResult) {
+  const candidate = childResultCandidate(result);
+  if (!candidate) return "no final text or structured submission";
+  return capped(candidate.replace(/\s+/g, " "), 1200);
+}
+
+const PLAN_REPAIR_PROMPT = `You repair a malformed managed-run planning result. Do not inspect the repository or solve the task again. Convert the supplied candidate into 2-24 concrete ordered steps, then call sab_submit_plan as your only and final action. If the candidate is empty, derive the smallest valid plan from the supplied goal.`;
+
+const REVIEW_REPAIR_PROMPT = `You repair a malformed independent-review result. Do not inspect the repository or repeat the review. Convert the supplied candidate into a pass or fix verdict with a concise summary and concrete findings, then call sab_submit_review as your only and final action.`;
 
 function executionPrompt(run: any) {
   const remaining = run.plan.filter((step: any) => step.status !== "done");
@@ -237,7 +247,7 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
     }, Math.max(0, remaining));
   }
 
-  async function runChild(role: ChildRole, task: string, ctx: ExtensionContext, signal?: AbortSignal, required = false): Promise<ChildResult> {
+  async function runChild(role: ChildRole, task: string, ctx: ExtensionContext, signal?: AbortSignal, required = false, overrides: { tools?: string[]; systemPrompt?: string } = {}): Promise<ChildResult> {
     if (!run || run.status !== "active") throw new Error("No managed run is active.");
     const expectedId = run.id;
     const budgetReason = subagentBudgetReason(run, role, required);
@@ -252,12 +262,15 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
     if (!run || run.id !== expectedId || run.status !== "active") throw new Error(`${role} subagent was interrupted`);
 
     const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null;
+    const tools = overrides.tools || ROLE_TOOLS[role];
+    const systemPrompt = overrides.systemPrompt || ROLE_PROMPTS[role];
     const args = [
       "--mode", "json", "--print", "--no-session", "--no-extensions", "--no-skills",
       "--no-prompt-templates", "--no-themes", "--no-approve",
-      "--tools", ROLE_TOOLS[role].join(","),
-      "--system-prompt", ROLE_PROMPTS[role],
+      "--tools", tools.join(","),
+      "--system-prompt", systemPrompt,
     ];
+    if (tools.some(tool => tool.startsWith("sab_submit_"))) args.push("--extension", MANAGED_CHILD_EXTENSION);
     if (model) args.push("--model", model);
     if (ctx.thinkingLevel) args.push("--thinking", ctx.thinkingLevel);
     args.push(`Task: ${task}`);
@@ -296,6 +309,8 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
         if (!line.trim()) return;
         let event: any;
         try { event = JSON.parse(line); } catch { return; }
+        const submission = structuredChildSubmission(event);
+        if (submission) result.structured = submission;
         if (event.type !== "message_end" || !event.message) return;
         const text = finalAssistantText(event.message);
         if (text) result.text = text;
@@ -339,7 +354,7 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
     run.counters.childTokens += Number(result.usage.totalTokens) || 0;
     run.counters.childOutputTokens += Number(result.usage.output) || 0;
     await update("ManagedChildUsage", { usage: result.usage, child_role: role });
-    if (result.exitCode !== 0 || !result.text.trim()) {
+    if (result.exitCode !== 0 || (!result.text.trim() && !result.structured)) {
       throw new Error(`${role} subagent failed${result.stderr ? `: ${result.stderr.slice(0, 1000)}` : ""}`);
     }
     result.text = capped(result.text);
@@ -436,7 +451,25 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
     try {
       const result = await runChild("planner", `Goal: ${run.goal}\nCreate the implementation plan.`, context, undefined, true);
       if (!run || run.id !== expectedId || run.status !== "active") return;
-      const parsed = parseManagedPlan(result.text);
+      let parsed;
+      try {
+        parsed = parseManagedPlan(result.text, result.structured);
+      } catch (firstError: any) {
+        const firstExcerpt = parseFailureExcerpt(result);
+        let repair;
+        try {
+          repair = await runChild("planner",
+            `Goal: ${run.goal}\n\nMalformed candidate:\n${childResultCandidate(result) || "(empty)"}`,
+            context, undefined, true, { tools: ["sab_submit_plan"], systemPrompt: PLAN_REPAIR_PROMPT });
+        } catch (repairLaunchError: any) {
+          throw new Error(`Planner result was invalid (${String(firstError?.message || firstError)}) and its repair could not run (${String(repairLaunchError?.message || repairLaunchError)}). First result excerpt: ${firstExcerpt}`);
+        }
+        try {
+          parsed = parseManagedPlan(repair.text, repair.structured);
+        } catch (repairError: any) {
+          throw new Error(`Planner did not submit a valid plan after one repair attempt (${String(repairError?.message || repairError)}). First result excerpt: ${firstExcerpt}; repair result excerpt: ${parseFailureExcerpt(repair)}`);
+        }
+      }
       run.plan = parsed.steps;
       run.summary = parsed.summary;
       run.risks = parsed.risks;
@@ -477,7 +510,24 @@ export function createManagedRunner(pi: ExtensionAPI, hooks: ManagedHooks) {
       const task = await repositoryReviewContext(context);
       const result = await runChild("reviewer", task, context, undefined, true);
       if (!run || run.id !== expectedId || run.status !== "active") return;
-      const verdict = parseManagedReview(result.text);
+      let verdict;
+      try {
+        verdict = parseManagedReview(result.text, result.structured);
+      } catch (firstError: any) {
+        const firstExcerpt = parseFailureExcerpt(result);
+        let repair;
+        try {
+          repair = await runChild("reviewer", `Malformed candidate:\n${childResultCandidate(result) || "(empty)"}`,
+            context, undefined, true, { tools: ["sab_submit_review"], systemPrompt: REVIEW_REPAIR_PROMPT });
+        } catch (repairLaunchError: any) {
+          throw new Error(`Reviewer result was invalid (${String(firstError?.message || firstError)}) and its repair could not run (${String(repairLaunchError?.message || repairLaunchError)}). First result excerpt: ${firstExcerpt}`);
+        }
+        try {
+          verdict = parseManagedReview(repair.text, repair.structured);
+        } catch (repairError: any) {
+          throw new Error(`Reviewer did not submit a valid verdict after one repair attempt (${String(repairError?.message || repairError)}). First result excerpt: ${firstExcerpt}; repair result excerpt: ${parseFailureExcerpt(repair)}`);
+        }
+      }
       run.review = verdict;
       run.activeAgent = null;
       reviewRequested = false;

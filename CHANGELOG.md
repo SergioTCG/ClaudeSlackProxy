@@ -4,6 +4,17 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.5] — 2026-08-20
+
+### Fixed
+- Managed Pi planners and independent reviewers now finish through isolated,
+  typed, terminating submission tools instead of relying on prompt-only JSON
+  prose. The bridge captures validated tool details, attempts one bounded
+  no-tools repair when legacy/malformed output cannot be parsed, and includes a
+  bounded diagnostic excerpt if both submissions fail.
+
+[1.5.0-rc.5]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.5
+
 ## [1.5.0-rc.4] — 2026-08-19
 
 ### Fixed

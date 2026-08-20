@@ -72,12 +72,20 @@ reviewer, or worker task. Children run sequentially, without a persisted Pi
 session, and return compressed results to the parent. The independent final
 review is always bridge-scheduled rather than self-certified by the worker.
 
+Planner and reviewer children finish by calling typed `sab_submit_plan` and
+`sab_submit_review` tools. These terminate the child immediately and let the
+runner consume validated tool arguments instead of depending on prompt-only
+JSON prose. Tagged JSON remains a compatibility fallback. If neither form is
+valid, the runner makes one no-tools formatting repair attempt and reports a
+bounded final-output excerpt if repair also fails.
+
 Each child inherits the current Pi model and thinking level. It does not inherit
-the Slack bridge, tmux identity, upload grant, parent session, extensions,
-skills, prompt templates, themes, or Pi project-resource approval. Planner,
-scout, and reviewer roles are read-only. A worker child can write only in
-ordinary unrestricted mode; SAB `--safe` disables worker children so no child
-can bypass the parent's Slack tool-approval gate.
+the Slack bridge, tmux identity, upload grant, parent session, parent/global
+extensions, skills, prompt templates, themes, or Pi project-resource approval.
+Planner/reviewer children load only the bridge-owned output-submission
+extension. Planner, scout, and reviewer roles are read-only. A worker child can
+write only in ordinary unrestricted mode; SAB `--safe` disables worker children
+so no child can bypass the parent's Slack tool-approval gate.
 
 ## Budgets and persistence
 

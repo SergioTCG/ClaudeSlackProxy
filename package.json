@@ -1,6 +1,6 @@
 {
   "name": "slack-agent-bridge",
-  "version": "1.5.0-rc.4",
+  "version": "1.5.0-rc.5",
   "description": "Control and hand off local Claude Code, Codex CLI, and Pi sessions from Slack with private channels and resumable terminals.",
   "private": true,
   "type": "module",
