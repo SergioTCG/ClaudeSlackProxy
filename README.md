@@ -51,6 +51,10 @@ for each one it has used.
 | Chrome integration flag | `--chrome` | No counterpart | No counterpart |
 | Live web search flag | Provider-managed | `--search` | model/provider-managed |
 
+While a turn is active, its live status remains the newest channel item: newer
+messages, bridge output, artifact deliveries, and topic notices re-anchor the
+timer without resetting its elapsed-time or token state.
+
 Codex output uses stable hook fields and the bridge never parses its unstable
 transcript JSONL directly; usage telemetry is delegated to `ccusage`'s public
 Codex JSON adapter. Pi uses its native extension API for inbound messages,

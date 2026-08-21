@@ -97,7 +97,10 @@ Slack (private channels, Socket Mode)
    explicitly unstable transcript format. Usage and live token counters enter
    only through `ccusage`'s maintained Codex JSON adapter. Pi's native extension
    supplies final text and usage directly; its session JSONL is never read.
-   Slack-injected messages are deduped for all providers.
+   Slack-injected messages are deduped for all providers. A live status edits
+   in place normally; because Slack cannot reorder an edited timestamp, newer
+   channel activity transactionally replaces it at the bottom and deletes the
+   superseded copy.
 8. **One control channel** — fresh 1.0 installs use
    `#slack-agent-bridge`; upgrades reuse `#claude-code-bridge`. Its immutable
    channel ID lives in state, so the public rename never creates a duplicate.
@@ -195,7 +198,9 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - A standby leg's late or manual hooks are fenced: it cannot create a duplicate
   channel or become live without the matching provider-switch transaction.
 - Topic synchronization reads Slack's current value after daemon boot and writes
-  only on a real folder/branch/model/effort change.
+  only on a real folder/branch/model/effort change. A real topic write, a manual
+  topic change, or a newer channel message re-anchors any active working status
+  below the new timeline item.
 - You may rename channels freely — mapping is by immutable channel id.
 
 ## Known limitations

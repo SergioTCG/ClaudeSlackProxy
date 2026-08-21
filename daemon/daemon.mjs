@@ -25,6 +25,7 @@ import {
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-binding.mjs'
 import { createTopicSync } from './topic.mjs'
+import { createStatusMessages } from './status.mjs'
 import {
   ArtifactUploadError, artifactDeliveryInstruction, createArtifactGrantStore, fulfillArtifactUpload,
   slackArtifactUploadOptions,
@@ -191,24 +192,47 @@ async function resolveUserName(userId) {
 }
 const collaborators = ch => state.whitelist[ch] || {}
 const whitelistedName = (ch, userId) => collaborators(ch)[userId] || null
+async function postSlackMessage(channel, payload, { waitForBump = true } = {}) {
+  const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...payload }))
+  const reanchor = bumpStatusForChannel(channel, result?.ts)
+  if (waitForBump) await reanchor
+  else reanchor.catch(error => log('deferred status bump error', String(error?.message || error)))
+  return result
+}
 function post(channel, text) {
-  return enqueue(channel, () => web.chat.postMessage({ channel, text, unfurl_links: false }))
+  return postSlackMessage(channel, { text, unfurl_links: false })
 }
 const MAX_INLINE = 6000 // longer responses upload as a file instead of many messages
 async function postMd(channel, md) {
   if (md.length > MAX_INLINE) {
-    return enqueue(channel, () => web.files.uploadV2({
-      channel_id: channel,
-      content: md,
-      filename: 'response.md',
-      title: 'response.md',
-      initial_comment: `📄 Long response (${md.length.toLocaleString()} chars) — attached:`,
-    })).catch(async e => {
+    let activityTs = null
+    let posted = false
+    try {
+      await enqueue(channel, () => web.files.uploadV2({
+        channel_id: channel,
+        content: md,
+        filename: 'response.md',
+        title: 'response.md',
+        initial_comment: `📄 Long response (${md.length.toLocaleString()} chars) — attached:`,
+      }))
+      posted = true
+    } catch (e) {
       log('file upload failed, falling back to inline', String(e))
-      for (const m of mdToMessages(md)) await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
-    })
+      for (const m of mdToMessages(md)) {
+        const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
+        activityTs = result?.ts || activityTs
+        posted = true
+      }
+    }
+    if (posted) await bumpStatusForChannel(channel, activityTs)
+    return
   }
-  for (const m of mdToMessages(md)) await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
+  let activityTs = null
+  for (const m of mdToMessages(md)) {
+    const result = await enqueue(channel, () => web.chat.postMessage({ channel, ...m, unfurl_links: false }))
+    activityTs = result?.ts || activityTs
+  }
+  if (activityTs) await bumpStatusForChannel(channel, activityTs)
 }
 
 // Every accepted Slack prompt receives a short-lived, one-use upload capability.
@@ -303,36 +327,28 @@ async function updateTopic(session) {
     model, effort,
   ].filter(Boolean).join(' · ')
   if (session.tmux) tmuxTitle(session.tmux, topic) // window title mirrors the channel topic
-  try { await syncTopic(session.channel, topic) }
+  const startedAt = (Date.now() / 1000).toFixed(6)
+  try {
+    const changed = await syncTopic(session.channel, topic)
+    if (changed) await bumpStatus(session, { afterTs: startedAt })
+  }
   catch (e) { log('setTopic error', e?.data?.error || String(e)) }
 }
 
-// ---- status line (edit-in-place) -------------------------------------------
-// The live status message ts is keyed by session id in a daemon-level map, not on
-// the session object — the poller and the Stop handler may hold different object
-// references for the same session, so a shared key avoids a stale/orphaned message.
-const statusTs = new Map() // sid → ts
-async function setStatus(session, text) {
-  if (!session.channel) return
-  const ts = statusTs.get(session.id)
-  try {
-    if (ts) {
-      await web.chat.update({ channel: session.channel, ts, text })
-    } else {
-      const r = await web.chat.postMessage({ channel: session.channel, text })
-      statusTs.set(session.id, r.ts)
-    }
-  } catch (e) {
-    if (e?.data?.error === 'message_not_found') statusTs.delete(session.id) // stale ts (deleted); repost next tick
-    else log('setStatus error:', e?.data?.error || String(e))
-  }
-}
-async function clearStatus(session) {
-  const ts = statusTs.get(session.id)
-  if (session.channel && ts) {
-    try { await web.chat.delete({ channel: session.channel, ts }) } catch {}
-    statusTs.delete(session.id)
-  }
+// ---- status line (edit in place, re-anchor after newer channel activity) ----
+// Slack message timestamps are immutable: an edit cannot move a status below a
+// new message or topic notice. Status mutations are serialized per session; a
+// bump posts the current text at the bottom, then removes the superseded copy.
+const liveStatuses = createStatusMessages(web, {
+  log,
+  postMessage: (channel, text) => enqueue(channel, () => web.chat.postMessage({ channel, text })),
+})
+const setStatus = (session, text) => liveStatuses.set(session, text)
+const clearStatus = session => liveStatuses.clear(session)
+const bumpStatus = (session, options) => liveStatuses.bump(session, options)
+async function bumpStatusForChannel(channel, afterTs = null) {
+  const session = sessionByChannel(channel)
+  return session ? bumpStatus(session, { afterTs }) : false
 }
 
 // ---- live status poller -----------------------------------------------------
@@ -411,7 +427,7 @@ async function relayQuestionForm(session, form) {
   let ts = prev?.ts
   try {
     if (ts) await web.chat.update({ channel: session.channel, ts, text: '❓ Claude asks a question', blocks })
-    else ts = (await enqueue(session.channel, () => web.chat.postMessage({ channel: session.channel, text: '❓ Claude asks a question', blocks }))).ts
+    else ts = (await postSlackMessage(session.channel, { text: '❓ Claude asks a question', blocks }, { waitForBump: false })).ts
   } catch (e) { log('qform relay error', e?.data?.error || String(e)); return }
   qforms.set(session.id, { ts, hash: form.hash, options: form.options, at: Date.now(), planFor: form.planPath ? form.hash : prev?.planFor })
   log('qform relayed', session.id.slice(0, 8), JSON.stringify(form.question.slice(0, 60)))
@@ -680,7 +696,7 @@ async function readoptStatus() {
     if (providerOf(s) === 'pi') {
       const ts = await findStatusMessage(s.channel)
       if (s.piTurnStartedAt) {
-        if (ts) statusTs.set(s.id, ts)
+        if (ts) liveStatuses.adopt(s.id, ts)
         startPiPoller(s)
         log('re-adopted live Pi turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
       } else if (ts) {
@@ -691,7 +707,7 @@ async function readoptStatus() {
     if (providerOf(s) === 'codex') {
       const ts = await findStatusMessage(s.channel)
       if (s.codexTurnStartedAt) {
-        if (ts) statusTs.set(s.id, ts)
+        if (ts) liveStatuses.adopt(s.id, ts)
         startCodexPoller(s)
         log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
       } else if (ts) {
@@ -709,7 +725,7 @@ async function readoptStatus() {
       startPoller(s) // poller relays the form and manages the answer
       log('re-adopted session waiting at a question form', s.id.slice(0, 8))
     } else if (spinning) {
-      if (ts) statusTs.set(s.id, ts) // resume editing the existing (frozen) message
+      if (ts) liveStatuses.adopt(s.id, ts) // resume editing the existing (frozen) message
       startPoller(s)
       log('re-adopted live turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
     } else {
@@ -1225,7 +1241,9 @@ async function postPermissionPrompt(channel, p) {
     },
     { type: 'context', elements: [{ type: 'mrkdwn', text: `or reply \`yes ${p.request_id}\` / \`no ${p.request_id}\`` }] },
   )
-  const r = await enqueue(channel, () => web.chat.postMessage({ channel, text: `🔐 Permission needed: ${p.tool_name}`, blocks }))
+  // Return the interactive timestamp before the rate-limited status repost so
+  // the permission is registered by the time its buttons become clickable.
+  const r = await postSlackMessage(channel, { text: `🔐 Permission needed: ${p.tool_name}`, blocks }, { waitForBump: false })
   return r.ts
 }
 
@@ -1668,10 +1686,10 @@ async function beginProviderSwitch(channel, source, { replaceMissing = false, ta
     '_The current provider remains active until a private handoff is safely captured._'
   scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
   try {
-    return await enqueue(channel, () => web.chat.postMessage({
-      channel, text,
+    return await postSlackMessage(channel, {
+      text,
       blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }, ...switchActionBlocks(transition, preflight)],
-    }))
+    })
   } catch (error) {
     if (activeTransition(channel)?.id === transition.id) {
       rollbackTransition(state, channel, 'provider switch preview delivery failed')
@@ -1717,13 +1735,13 @@ async function proposeInstructionAlignment(channel, lineage, transition) {
   scheduleSwitchPreviewExpiry(channel, transition.id, transition.updatedAt)
   const shown = checked.patch.length > 2600 ? checked.patch.slice(0, 2600) + '\n… (full proposal attached below)' : checked.patch
   const text = `📝 *Instruction reconciliation proposal*\n\`\`\`diff\n${shown}\`\`\`\n_Apply leaves these changes uncommitted for normal review._`
-  await enqueue(channel, () => web.chat.postMessage({
-    channel, text: 'Instruction reconciliation proposal ready.',
+  await postSlackMessage(channel, {
+    text: 'Instruction reconciliation proposal ready.',
     blocks: [
       { type: 'section', text: { type: 'mrkdwn', text: text.slice(0, 2950) } },
       ...switchActionBlocks(transition, preflight, 'proposal'),
     ],
-  }))
+  })
   if (checked.patch.length > 2600) await postMd(channel, `*Full instruction proposal*\n\n\`\`\`diff\n${checked.patch}\`\`\``)
 }
 
@@ -2201,8 +2219,8 @@ async function postFolderPicker(channel, provider = 'claude') {
   if (!dirs.length) return post(channel, `No projects in \`${base}\`. Set CCS_CODE_DIR, or use \`${slackCommand(provider, 'new')} <folder>\`.`)
   const options = dirs.slice(0, 100).map(d => ({ text: { type: 'plain_text', text: d.slice(0, 75) }, value: d.slice(0, 75) }))
   const pickerAction = { claude: 'ccnew_folder', codex: 'ccnew_folder_codex', pi: 'ccnew_folder_pi' }[provider]
-  await web.chat.postMessage({
-    channel, text: 'Pick a project to start a session in',
+  await postSlackMessage(channel, {
+    text: 'Pick a project to start a session in',
     blocks: [{
       type: 'section', text: { type: 'mrkdwn', text: `*Start a ${providerLabel(provider)} session* — pick a project in \`${base}\`:` },
       accessory: { type: 'static_select', action_id: pickerAction, placeholder: { type: 'plain_text', text: 'Choose a project…' }, options },
@@ -2732,7 +2750,7 @@ async function dispatch(name, rest, channel, commandProvider = 'claude', request
         (lineage?.transition ? `| Transition | ${lineage.transition.phase} → ${providerLabel(lineage.transition.target.provider)} |\n` : '') +
         `| Changes | ${changes} |` +
         (gs ? '\n```\n' + gs.slice(0, 1200) + '\n```' : ''))
-      await web.chat.postMessage({ channel, text: 'Collaborators', blocks: await collabBlocks(channel) })
+      await postSlackMessage(channel, { text: 'Collaborators', blocks: await collabBlocks(channel) })
       return
     }
     const rows = Object.values(state.sessions).filter(s => providerOf(s) === commandProvider).map(s => {
@@ -3246,6 +3264,7 @@ http.createServer(async (req, res) => {
         paths: request.paths,
       }, async ({ grant, files }) => {
         await enqueue(grant.channelId, () => web.filesUploadV2(slackArtifactUploadOptions(grant, files)))
+        if (!grant.threadTs) await bumpStatusForChannel(grant.channelId)
       })
       log('artifact uploaded', provider, session.id.slice(0, 8), result.filenames.join(','), result.totalBytes + 'b')
       res.end(JSON.stringify({ ok: true, ...result }))
@@ -3328,9 +3347,21 @@ http.createServer(async (req, res) => {
 const sm = new SocketModeClient({ appToken: process.env.SLACK_APP_TOKEN })
 sm.on('message', async ({ event, ack }) => {
   try { await ack() } catch {}
-  if (!event || event.bot_id) return
+  if (!event) return
+  // A Slack topic change is rendered as a channel timeline item. Re-anchor an
+  // active status after manual topic changes too; bridge-owned changes also do
+  // this directly in updateTopic, and the event timestamp makes this a no-op if
+  // that path already won the race.
+  if (event.subtype === 'channel_topic') {
+    await bumpStatusForChannel(event.channel, event.ts || null)
+    return
+  }
+  if (event.bot_id) return
   // allow normal messages and file shares; skip edits/joins/other subtypes
   if (event.subtype && event.subtype !== 'file_share') return
+  // Re-anchor before processing so even a queued or rejected human message
+  // cannot leave a live working status stranded above it in the channel.
+  if (!event.thread_ts) await bumpStatusForChannel(event.channel, event.ts || null)
   // The owner is always trusted; a whitelisted collaborator may post prompts too.
   const isOwner = event.user === USER
   const name = isOwner ? null : whitelistedName(event.channel, event.user)

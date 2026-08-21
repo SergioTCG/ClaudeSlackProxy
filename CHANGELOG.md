@@ -4,6 +4,16 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.6] — 2026-08-21
+
+### Fixed
+- Live Claude, Codex, and Pi working-status messages are re-anchored below
+  newer channel messages, bridge output, artifact deliveries, and real topic
+  changes. Status replacement is serialized per session and rolls back safely
+  if Slack cannot remove the superseded copy.
+
+[1.5.0-rc.6]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.6
+
 ## [1.5.0-rc.5] — 2026-08-20
 
 ### Fixed

@@ -61,6 +61,9 @@
 - [ ] Claude, Codex, and Pi terminal-close → Slack-prompt → Ghostty-resume works.
 - [ ] Topics include folder, branch, model, and reasoning effort.
 - [ ] Restarting with unchanged metadata does not write channel topics again.
+- [ ] During a Claude, Codex, and Pi turn, a new channel message and a real
+      topic change each re-anchor the live status as the newest item; its timer
+      continues updating and only one status copy remains.
 - [ ] Claude, Codex, and Pi usage reports and live time/token status work; local
       Pi models retain zero cost and report current context.
 - [ ] File transfer, interrupt, model, effort, flags, and update commands work.
