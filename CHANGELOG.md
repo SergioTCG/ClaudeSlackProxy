@@ -4,6 +4,18 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.8] — 2026-08-21
+
+### Fixed
+- `/codex-stop` now waits for either the normal `Stop` hook or Codex's idle
+  input surface before reporting success. Confirmed hookless interrupts clear
+  their persisted timer and Slack working status; unconfirmed interrupts keep
+  tracking active and report a visible warning.
+- Daemon startup now removes an orphaned Codex working status when persisted
+  turn state points at a TUI that has already returned to idle.
+
+[1.5.0-rc.8]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.8
+
 ## [1.5.0-rc.7] — 2026-08-21
 
 ### Fixed

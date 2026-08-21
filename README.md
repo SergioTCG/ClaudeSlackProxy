@@ -174,7 +174,7 @@ you are invited. You may rename it; the bridge stores the immutable channel ID.
 | `/cc-flags [flags]` / `/codex-flags …` / `/pi-flags …` | Show or replace allowlisted launch flags |
 | `/cc-update` / `/codex-update` / `/pi-update` | Update the selected CLI and resume the session |
 | `/cc-status` / `/codex-status` / `/pi-status` | Session details or a provider-filtered list |
-| `/cc-stop` / `/codex-stop` / `/pi-stop` | Interrupt the current turn |
+| `/cc-stop` / `/codex-stop` / `/pi-stop` | Interrupt the current turn; Codex confirms idle or reports that the interrupt is still pending |
 | `/cc-switch [codex\|pi] [new]` / `/codex-switch [claude\|pi] [new]` / `/pi-switch <claude\|codex> [new]` | Hand this channel to another provider; `new` explicitly replaces a missing saved leg |
 | `/cc-kill [id]` / `/codex-kill [id]` / `/pi-kill [id]` | End the process; keep its resumable channel |
 | `/cc-help` / `/codex-help` / `/pi-help` | Show commands for that provider |

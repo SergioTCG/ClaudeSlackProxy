@@ -208,6 +208,11 @@ Commands are native Slack slash commands (`slash_commands` events over Socket Mo
 - Consent dialog on every launch (research preview) — one keypress locally, auto-keyed for remote spawns. Goes away if the plugin ever reaches an allowlist.
 - Codex does not expose Claude's whimsical spinner verbs. Its stable working
   status combines hook timing with bounded `ccusage` token snapshots instead.
+  A requested `/codex-stop` is reconciled against the exact tracked turn: the
+  daemon waits for either `Stop` or the visible idle input surface before
+  clearing status, and leaves tracking active with a warning when neither is
+  observed. Startup uses the same idle check to discard orphaned interrupt
+  status without reading Codex transcripts.
 - Pi capabilities depend on its installed version and selected model. Native
   image delivery is rejected visibly for text-only models; Pi has no Chrome
   flag counterpart.

@@ -254,6 +254,35 @@ export function targetStartupState(provider, pane) {
   return 'starting'
 }
 
+export function codexStatusRecoveryDecision(session, pane) {
+  if (!session?.codexTurnStartedAt) return 'clear'
+  return targetStartupState('codex', pane) === 'ready' ? 'clear' : 'resume'
+}
+
+// Codex normally emits Stop when a turn finishes, but an operator interrupt can
+// return the TUI to its input surface without that hook. Reconcile only the turn
+// that was active when the interrupt was requested: a newer timestamp means a
+// subsequent prompt already started and must retain its own status/poller.
+export async function waitForCodexInterrupt(session, {
+  getPane,
+  attempts = 20,
+  intervalMs = 250,
+  sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
+  const interruptedTurnStartedAt = session?.codexTurnStartedAt ?? null
+  const tries = Math.max(1, Number(attempts) || 1)
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const currentStartedAt = session?.codexTurnStartedAt ?? null
+    if (interruptedTurnStartedAt !== null && currentStartedAt === null) return 'hook'
+    if (currentStartedAt !== interruptedTurnStartedAt) return 'superseded'
+    try {
+      if (targetStartupState('codex', await getPane()) === 'ready') return 'idle'
+    } catch {}
+    if (attempt + 1 < tries) await sleepFn(intervalMs)
+  }
+  return 'timeout'
+}
+
 export async function waitForTargetSessionClaim(transition, {
   attempts = 60, intervalMs = 500, sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
 } = {}) {

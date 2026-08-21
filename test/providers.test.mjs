@@ -6,11 +6,11 @@ import path from 'node:path'
 import {
   acceptHookSettings, codexEffortFromArgs, codexEffortFromToml,
   CODEX_DANGEROUS_FLAG, codexFlagsWithoutInitialPrompt, codexPermissionDecision,
-  defaultNewFlagsFor, displayFlagsFor, isPathWithin,
+  codexStatusRecoveryDecision, defaultNewFlagsFor, displayFlagsFor, isPathWithin,
   isSupersededHook, normalizeLaunchFlag,
   parseSlackCommand, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
-  submitTargetValidation,
+  submitTargetValidation, waitForCodexInterrupt,
 } from '../daemon/providers.mjs'
 
 test('legacy sessions remain Claude without a state migration', () => {
@@ -171,6 +171,69 @@ test('Codex target readiness ignores blank rows below the UI in a tall terminal'
 gpt-5.6-sol xhigh · ~/Code/Barrique${'\n'.repeat(40)}`
 
   assert.equal(targetStartupState('codex', ready), 'ready')
+})
+
+test('Codex interrupt reconciliation accepts the normal Stop hook', async () => {
+  const session = { codexTurnStartedAt: 100 }
+  const result = await waitForCodexInterrupt(session, {
+    attempts: 2,
+    getPane: async () => 'still working · esc to interrupt',
+    sleepFn: async () => { delete session.codexTurnStartedAt },
+  })
+
+  assert.equal(result, 'hook')
+})
+
+test('Codex interrupt reconciliation accepts the idle input surface when Stop is omitted', async () => {
+  const session = { codexTurnStartedAt: 100 }
+  const pane = `■ Conversation interrupted - tell the model what to do differently.\n` +
+    `› Improve documentation in @filename\n` +
+    `  gpt-5.6-sol xhigh · ~/Code/Barrique`
+
+  assert.equal(await waitForCodexInterrupt(session, {
+    attempts: 1,
+    getPane: async () => pane,
+  }), 'idle')
+  assert.equal(session.codexTurnStartedAt, 100)
+})
+
+test('Codex interrupt reconciliation does not clear a newer turn', async () => {
+  const session = { codexTurnStartedAt: 100 }
+  const result = await waitForCodexInterrupt(session, {
+    attempts: 2,
+    getPane: async () => 'still working · esc to interrupt',
+    sleepFn: async () => { session.codexTurnStartedAt = 200 },
+  })
+
+  assert.equal(result, 'superseded')
+  assert.equal(session.codexTurnStartedAt, 200)
+})
+
+test('Codex interrupt reconciliation reports an unconfirmed interrupt', async () => {
+  const session = { codexTurnStartedAt: 100 }
+  let sleeps = 0
+  const result = await waitForCodexInterrupt(session, {
+    attempts: 3,
+    getPane: async () => 'still working · esc to interrupt',
+    sleepFn: async () => { sleeps++ },
+  })
+
+  assert.equal(result, 'timeout')
+  assert.equal(sleeps, 2)
+  assert.equal(session.codexTurnStartedAt, 100)
+})
+
+test('Codex status recovery clears an orphaned turn once the TUI is idle', () => {
+  const idle = `■ Conversation interrupted\n` +
+    `› Improve documentation in @filename\n` +
+    `  gpt-5.6-sol xhigh · ~/Code/Barrique`
+  const working = `› queued input\n` +
+    `• Working (8s · esc to interrupt)\n` +
+    `  gpt-5.6-sol xhigh · ~/Code/Barrique`
+
+  assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, idle), 'clear')
+  assert.equal(codexStatusRecoveryDecision({ codexTurnStartedAt: 100 }, working), 'resume')
+  assert.equal(codexStatusRecoveryDecision({}, idle), 'clear')
 })
 
 test('Pi target readiness never trusts terminal text in place of its native stream', () => {

@@ -123,3 +123,11 @@ test('daemon re-anchors status after posts, topic changes, and channel messages'
   assert.match(daemon, /if \(!event\.thread_ts\) await bumpStatusForChannel\(event\.channel, event\.ts \|\| null\)/)
   assert.match(daemon, /liveStatuses\.adopt\(s\.id, ts\)/)
 })
+
+test('Codex stop waits for confirmation and clears only the interrupted turn', () => {
+  assert.match(daemon, /waitForCodexInterrupt\(session/)
+  assert.match(daemon, /interruptedTurnStartedAt = session\.codexTurnStartedAt/)
+  assert.match(daemon, /outcome === 'idle'[\s\S]*stopPoller\(session\)[\s\S]*clearStatus\(session\)/)
+  assert.match(daemon, /Codex did not return to idle[\s\S]*working status remains active/)
+  assert.match(daemon, /codexStatusRecoveryDecision\(s,[\s\S]*cleared stale Codex turn status/)
+})

@@ -33,7 +33,7 @@ mappings retain their current shape, so activation needs no state migration.
 | Final response → Slack | `Stop.last_assistant_message` | Implemented without parsing Codex JSONL |
 | Dormant-session resume | `codex resume <UUID>` in a new Ghostty/tmux window | Implemented |
 | Approve/deny from Slack | Synchronous `PermissionRequest` hook; daemon holds the response until a Slack verdict | Implemented for non-yolo sessions; local prompt is the failure fallback |
-| Interrupt turn | Launcher binds Codex `interrupt_turn` to F12; daemon sends F12 | Implemented |
+| Interrupt turn | Launcher binds Codex `interrupt_turn` to F12; daemon sends F12, then confirms `Stop` or the idle input surface before clearing live status | Implemented |
 | Model/reasoning control | Restart/resume with `--model` and `model_reasoning_effort` | Implemented |
 | Model discovery | `codex debug models --bundled` | Implemented |
 | File attachments | Existing Slack download + local-path prompt | Implemented |

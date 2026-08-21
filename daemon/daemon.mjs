@@ -17,10 +17,12 @@ import {
 import { enqueue, mdToMessages, reportSlashFailure, unescapeSlack, escapeText } from './slackout.mjs'
 import {
   CODEX_DANGEROUS_FLAG, CODEX_EFFORTS, PI_EFFORTS, PROVIDERS, acceptHookSettings, allowedFlags,
-  codexFlagsWithoutInitialPrompt, codexPermissionDecision, defaultNewFlagsFor, displayFlagsFor,
+  codexFlagsWithoutInitialPrompt, codexPermissionDecision, codexStatusRecoveryDecision,
+  defaultNewFlagsFor, displayFlagsFor,
   isPathWithin, isSupersededHook, normalizeLaunchFlag, normalizeProvider, parseSlackCommand,
   providerCommand, providerLabel, providerOf, resolveCodexEffort, resumeArgsFor, slackCommand,
   submitTargetValidation, switchActionBlocks, switchTargetLaunch, targetStartupState, waitForTargetSessionClaim,
+  waitForCodexInterrupt,
 } from './providers.mjs'
 import { CONTROL_CHANNEL_NAME, findControlChannel, prunePermissionsOnBoot } from './identity.mjs'
 import { createSessionChannelGate, pruneSessionChannelAliases } from './channel-binding.mjs'
@@ -707,9 +709,17 @@ async function readoptStatus() {
     if (providerOf(s) === 'codex') {
       const ts = await findStatusMessage(s.channel)
       if (s.codexTurnStartedAt) {
-        if (ts) liveStatuses.adopt(s.id, ts)
-        startCodexPoller(s)
-        log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+        const recovery = codexStatusRecoveryDecision(s, await tmuxCapture(s.tmux))
+        if (recovery === 'clear') {
+          if (ts) liveStatuses.adopt(s.id, ts)
+          stopPoller(s)
+          await clearStatus(s)
+          log('cleared stale Codex turn status', s.id.slice(0, 8))
+        } else {
+          if (ts) liveStatuses.adopt(s.id, ts)
+          startCodexPoller(s)
+          log('re-adopted live Codex turn', s.id.slice(0, 8), ts ? '(resumed status)' : '(fresh status)')
+        }
       } else if (ts) {
         try { await web.chat.delete({ channel: s.channel, ts }) } catch {}
       }
@@ -2886,13 +2896,31 @@ async function dispatch(name, rest, channel, commandProvider = 'claude', request
   if (name === 'stop') {
     const session = sessionByChannel(channel)
     if (!session?.tmux || !(session.pid && pidAlive(session.pid))) return post(channel, 'No active session here to interrupt.')
-    if (providerOf(session) === 'pi') {
+    const activeProvider = providerOf(session)
+    if (activeProvider === 'pi') {
       let result
       try { result = await sendPiControl(session, 'abort') }
       catch (error) { return post(channel, `⚠️ Pi interrupt failed: ${String(error?.message || error).slice(0, 200)}`) }
       if (result?.managed?.routing_cancelled) return post(channel, '⎋ *Interrupted* adaptive routing; the queued prompt was not delivered.')
       if (result?.managed?.status === 'paused') return post(channel, '⎋ *Interrupted* the turn and paused its managed run. Resume with `/pi-run continue`.')
-    } else await tmuxInterrupt(session.tmux, providerOf(session))
+    } else if (activeProvider === 'codex') {
+      const interruptedTurnStartedAt = session.codexTurnStartedAt ?? null
+      try { await tmuxInterrupt(session.tmux, 'codex') }
+      catch (error) { return post(channel, `⚠️ Codex interrupt could not be sent: ${String(error?.message || error).slice(0, 200)}`) }
+      const outcome = await waitForCodexInterrupt(session, { getPane: () => tmuxCapture(session.tmux) })
+      if (outcome === 'hook') return post(channel, '⎋ *Interrupted* the running turn.')
+      if (outcome === 'superseded' || (session.codexTurnStartedAt ?? null) !== interruptedTurnStartedAt) {
+        return post(channel, '⎋ *Interrupted* the prior turn; a newer Codex turn is already running.')
+      }
+      if (outcome === 'idle') {
+        stopPoller(session)
+        await clearStatus(session)
+        return post(channel, interruptedTurnStartedAt === null
+          ? 'ℹ️ Codex is already idle; any stale working status was cleared.'
+          : '⎋ *Interrupted* the running turn. Codex returned to idle and its working status was cleared.')
+      }
+      return post(channel, '⚠️ Interrupt sent, but Codex did not return to idle within 5 seconds. The working status remains active; retry `/codex-stop` or inspect Ghostty.')
+    } else await tmuxInterrupt(session.tmux, activeProvider)
     return post(channel, '⎋ *Interrupted* the running turn.')
   }
   if (name === 'usage') {
