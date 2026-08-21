@@ -4,6 +4,16 @@ Notable changes to this project. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versioning per
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0-rc.7] — 2026-08-21
+
+### Fixed
+- Long inline Slack responses now split Block Kit sections at nearby paragraph,
+  newline, or word boundaries instead of cutting words at an arbitrary character.
+  Oversized code fences remain independently valid and hard splits preserve
+  Unicode surrogate pairs.
+
+[1.5.0-rc.7]: https://github.com/SergioTCG/SlackAgentBridge/releases/tag/v1.5.0-rc.7
+
 ## [1.5.0-rc.6] — 2026-08-21
 
 ### Fixed

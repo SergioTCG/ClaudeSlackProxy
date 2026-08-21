@@ -89,6 +89,152 @@ function parseTable(lines) {
   }
 }
 
+const SECTION_TEXT_LIMIT = 2900 // Slack caps mrkdwn section text at 3000 chars
+const MIN_NATURAL_FILL = 0.55
+
+function safeHardCut(text, limit) {
+  let cut = Math.min(limit, text.length)
+  // JavaScript slices UTF-16 code units. Never bisect a surrogate pair when an
+  // unbroken token leaves us no whitespace boundary to use.
+  if (cut < text.length && cut > 0) {
+    const before = text.charCodeAt(cut - 1)
+    const after = text.charCodeAt(cut)
+    if (before >= 0xD800 && before <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF) cut--
+  }
+  return Math.max(1, cut)
+}
+
+// Find a useful boundary without cutting inside inline code or a Slack link.
+// Prefer paragraph/newline boundaries when they fill most of the section, then
+// ordinary whitespace. A hard cut remains the bounded fallback for a single
+// token longer than Slack's section limit.
+function naturalCut(text, limit, protectInline = true) {
+  if (text.length <= limit) return text.length
+  if (limit < 1) return 0
+  const window = text.slice(0, limit)
+  let paragraph = 0, newline = 0, whitespace = 0
+  let inCode = false, inLink = false
+  for (let i = 0; i < window.length; i++) {
+    const char = window[i]
+    if (protectInline && char === '`' && !inLink && window[i - 1] !== '\\') {
+      inCode = !inCode
+      continue
+    }
+    if (protectInline && !inCode && char === '<') { inLink = true; continue }
+    if (protectInline && inLink) {
+      if (char === '>') inLink = false
+      continue
+    }
+    if (inCode) continue
+    if (/\s/.test(char)) whitespace = i + 1
+    if (char === '\n') {
+      newline = i + 1
+      if (window[i + 1] === '\n' && i + 2 <= limit) paragraph = i + 2
+    }
+  }
+
+  const floor = Math.floor(limit * MIN_NATURAL_FILL)
+  if (paragraph >= floor) return paragraph
+  if (newline >= floor) return newline
+  if (whitespace >= floor) return whitespace
+  return Math.max(paragraph, newline, whitespace) || safeHardCut(text, limit)
+}
+
+function splitExact(text, limit, protectInline = true) {
+  const chunks = []
+  let rest = text
+  while (rest.length > limit) {
+    const cut = naturalCut(rest, limit, protectInline)
+    chunks.push(rest.slice(0, cut))
+    rest = rest.slice(cut)
+  }
+  if (rest) chunks.push(rest)
+  return chunks
+}
+
+function fencedSegments(text) {
+  const segments = []
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) || []
+  let buffer = '', inFence = false
+  const push = (type, value) => { if (value) segments.push({ type, text: value }) }
+
+  for (const line of lines) {
+    const marker = /^[\t ]*```/.test(line)
+    if (!inFence && marker) {
+      push('prose', buffer)
+      buffer = line
+      inFence = true
+    } else if (inFence) {
+      buffer += line
+      if (marker) {
+        push('fence', buffer)
+        buffer = ''
+        inFence = false
+      }
+    } else {
+      buffer += line
+    }
+  }
+  // Preserve malformed/unclosed input verbatim; valid fenced blocks take the
+  // specialized path below so every emitted Slack section remains fenced.
+  push('prose', buffer)
+  return segments
+}
+
+function splitLongFence(text, limit) {
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) || []
+  const opener = lines.shift() || ''
+  const closing = lines.pop() || ''
+  const trailing = closing.endsWith('\n') ? '\n' : ''
+  const closingMarker = closing.trimEnd()
+  const body = lines.join('')
+  const bodyLimit = limit - opener.length - closingMarker.length - 1
+  if (bodyLimit < 1 || !closingMarker.trimStart().startsWith('```')) return splitExact(text, limit)
+
+  const pieces = splitExact(body, bodyLimit, false)
+  return pieces.map((piece, index) =>
+    opener + piece + (piece.endsWith('\n') ? '' : '\n') + closingMarker +
+      (index === pieces.length - 1 ? trailing : '')
+  )
+}
+
+function splitMrkdwnSections(text, limit = SECTION_TEXT_LIMIT) {
+  const chunks = []
+  let current = ''
+  const flush = () => {
+    if (current) chunks.push(current)
+    current = ''
+  }
+  const appendProse = value => {
+    let rest = value
+    while (rest) {
+      const capacity = limit - current.length
+      if (rest.length <= capacity) { current += rest; return }
+      // Do not strand a tiny fragment after a preceding Markdown construct.
+      if (current && capacity < limit * MIN_NATURAL_FILL) { flush(); continue }
+      const cut = naturalCut(rest, capacity)
+      if (!cut) { flush(); continue }
+      current += rest.slice(0, cut)
+      rest = rest.slice(cut)
+      flush()
+    }
+  }
+
+  for (const segment of fencedSegments(text)) {
+    if (segment.type === 'fence' && segment.text.length > limit) {
+      flush()
+      chunks.push(...splitLongFence(segment.text, limit))
+    } else if (segment.type === 'fence') {
+      if (current && current.length + segment.text.length > limit) flush()
+      current += segment.text
+    } else {
+      appendProse(segment.text)
+    }
+  }
+  flush()
+  return chunks
+}
+
 // Returns an array of message payloads [{text, blocks}] ready for chat.postMessage.
 export function mdToMessages(md) {
   const lines = md.split('\n')
@@ -98,9 +244,8 @@ export function mdToMessages(md) {
     const text = mrkdwn(buf.join('\n')).trim()
     buf = []
     if (!text) return
-    // section blocks cap at 3000 chars
-    for (let i = 0; i < text.length; i += 2900) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: text.slice(i, i + 2900) } })
+    for (const chunk of splitMrkdwnSections(text)) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: chunk } })
     }
   }
   let inFence = false
